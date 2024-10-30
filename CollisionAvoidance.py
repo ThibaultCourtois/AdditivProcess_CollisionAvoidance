@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import trimesh
 
+
 class TrajectoryAcquisition:
     def __init__(self, file_path):
         # Lecture du fichier CSV
@@ -11,6 +12,7 @@ class TrajectoryAcquisition:
         self.points = self.trajectory_data[['X', 'Y', 'Z']].values
         self.build_directions = self.trajectory_data[['Bx', 'By', 'Bz']].values
         self.tool_directions = self.trajectory_data[['Tx', 'Ty', 'Tz']].values
+        self.extrusion = self.trajectory_data['Extrusion'].values
         # Identification des couches basée sur la colonne Extrusion
         self.layer_indices = self.identify_layers()
 
@@ -32,6 +34,7 @@ class TrajectoryAcquisition:
         start_idx = self.layer_indices[layer_index]
         end_idx = self.layer_indices[layer_index + 1] if layer_index + 1 < len(self.layer_indices) else len(self.points)
         return self.build_directions[start_idx:end_idx]
+
 
 class CollisionAvoidance:
     def __init__(self, trajectory, bead_width, bead_height, tool_radius, tool_length, tool_geometry_path):
