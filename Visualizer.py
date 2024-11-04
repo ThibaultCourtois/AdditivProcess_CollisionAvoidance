@@ -54,7 +54,7 @@ class TrajectoryVisualizer:
         # Fixed parameters from project requirements
         self.h_layer = 1.95  # mm (hauteur constante)
         self.w_layer = 3  # mm (largeur constante)
-        self.L_seg = 1  # mm (longueur de segment)
+        self.L_seg = 0.32  # mm (longueur de segment)
         self.scale_vectors = scale_vectors
 
         # Setup figure and 3D axes
@@ -139,82 +139,8 @@ class TrajectoryVisualizer:
         vertices = [list(zip(points_closed[:, 0],
                              points_closed[:, 1],
                              points_closed[:, 2]))]
-        poly = Poly3DCollection(vertices, alpha=0.6, color='gray')
+        poly = Poly3DCollection(vertices, alpha=0.3, color='gray')
         ax.add_collection3d(poly)
-
-    def ellipse_display_segmentation(self, display_points, normalized_t_vector, normalized_b_vector, normalized_n_vector, extrusion):
-        """
-        Create new points along trajectory spaced by L_seg for ellipse display
-
-        Parameters:
-        -----------
-        display_points : ndarray
-            Original trajectory points
-        normalized_t/b/n_vector : ndarray
-            Normalized direction vectors
-
-        Returns:
-        --------
-        new_points : ndarray
-            New points spaced by L_seg
-        new_vectors : tuple
-            (t, b, n) vectors interpolated at new points
-        """
-
-        # Filtering extrusion
-        last_deposit_idx = len(extrusion) - 1
-        while last_deposit_idx > 0 and extrusion[last_deposit_idx] == 0:
-            last_deposit_idx -= 1
-        last_deposit_idx -= 1
-        mask = np.zeros(len(extrusion), dtype=bool)
-        mask[:last_deposit_idx + 1] = (extrusion[:last_deposit_idx + 1] == 1)
-
-        display_points = display_points[mask]
-        normalized_t_vector = normalized_t_vector[mask]
-        normalized_b_vector = normalized_b_vector[mask]
-        normalized_n_vector = normalized_n_vector[mask]
-
-        # Calculate distances between points
-        diff = np.diff(display_points, axis=0)
-        distances = np.linalg.norm(diff, axis=1)
-        cumul_dist = np.cumsum(np.insert(distances, 0, 0))  # Add 0 at start
-        total_dist = cumul_dist[-1]
-
-        # Create evenly spaced points
-        num_points = int(np.ceil(total_dist / self.L_seg))
-        target_distances = np.linspace(0, total_dist, num_points)
-
-        new_points = np.zeros((num_points, 3))
-        new_t = np.zeros((num_points, 3))
-        new_b = np.zeros((num_points, 3))
-        new_n = np.zeros((num_points, 3))
-
-        # Interpolate points and vectors
-        for i, target in enumerate(target_distances):
-            # Find segment containing target distance
-            idx = np.searchsorted(cumul_dist, target) - 1
-            idx = max(0, min(idx, len(display_points) - 2))
-
-            # Calculate interpolation factor
-            segment_length = cumul_dist[idx + 1] - cumul_dist[idx]
-            alpha = (target - cumul_dist[idx]) / segment_length if segment_length > 0 else 0
-
-            # Interpolate point
-            p0 = display_points[idx]
-            p1 = display_points[idx + 1]
-            new_points[i] = p0 + alpha * (p1 - p0)
-
-            # Interpolate vectors
-            new_t[i] = (1 - alpha) * normalized_t_vector[idx] + alpha * normalized_t_vector[idx + 1]
-            new_b[i] = (1 - alpha) * normalized_b_vector[idx] + alpha * normalized_b_vector[idx + 1]
-            new_n[i] = (1 - alpha) * normalized_n_vector[idx] + alpha * normalized_n_vector[idx + 1]
-
-            # Renormalize vectors
-            new_t[i] /= np.linalg.norm(new_t[i])
-            new_b[i] /= np.linalg.norm(new_b[i])
-            new_n[i] /= np.linalg.norm(new_n[i])
-
-        return new_points, (new_t, new_b, new_n)
 
     #-------------------------------------------------------------------
     # Main Visualization Methods
@@ -239,67 +165,115 @@ class TrajectoryVisualizer:
         display_b_vector = self.build_directions[start_idx:end_idx]
         display_tool_vector = self.tool_directions[start_idx:end_idx]
 
-        # Plot trajectory line
-        self.ax.plot(display_points[:, 0],
-                     display_points[:, 1],
-                     display_points[:, 2],
-                     'k-', label='Trajectory', alpha=1)
+        # Calculate angles for all points
+        xy_angles = np.degrees(np.arctan2(display_points[:, 1], display_points[:, 0]))
+        xy_angles = np.where(xy_angles < 0, xy_angles + 360, xy_angles)
 
-        # Calculate tangent vectors
-        tangents = np.zeros_like(display_points)
-        tangents[:-1] = display_points[1:] - display_points[:-1]
+        # Create angle mask
+        angle_mask = xy_angles <= self.revolute_display_angle
+
+        # Apply mask to display points
+        filtered_points = display_points[angle_mask]
+        filtered_b_vector = display_b_vector[angle_mask]
+        filtered_tool_vector = display_tool_vector[angle_mask]
+
+        # Calculate tangent vectors for filtered points
+        tangents = np.zeros_like(filtered_points)
+        tangents[:-1] = filtered_points[1:] - filtered_points[:-1]
         tangents[-1] = tangents[-2]
 
         # Normalize and scale vectors to fixed length
-        b_vector_norm = np.linalg.norm(display_b_vector, axis=1)
+        b_vector_norm = np.linalg.norm(filtered_b_vector, axis=1)
         t_vector_norm = np.linalg.norm(tangents, axis=1)
 
-        normalized_b_vector = display_b_vector / b_vector_norm[:, np.newaxis]
+        normalized_b_vector = filtered_b_vector / b_vector_norm[:, np.newaxis]
         normalized_t_vector = tangents / t_vector_norm[:, np.newaxis]
         normalized_n_vector = np.cross(normalized_t_vector, normalized_b_vector)
 
-        display_ellipse_points, ellipse_vectors = self.ellipse_display_segmentation(display_points, normalized_t_vector, normalized_b_vector, normalized_n_vector, self.extrusion_data[start_idx:end_idx])
+        # Plot filtered trajectory with discontinuity handling
+        segments = []
+        current_segment = []
+        max_angle_diff = 6
 
-        # Draw geometry at specified stride
-        for i in range(0, len(display_ellipse_points), self.stride):
-            if self.ellipse_bool:
-                ellipse_points = self.construct_half_ellipse(display_ellipse_points[i], ellipse_vectors[2][i], ellipse_vectors[1][i], ellipse_vectors[0][i])
+        for i in range(len(display_points)):
+            if angle_mask[i]:
+                # First point of the segment ?
+                if not current_segment:
+                    current_segment.append(display_points[i])
+                else:
+                    # Angle calculation
+                    prev_angle = np.degrees(np.arctan2(current_segment[-1][1], current_segment[-1][0]))
+                    curr_angle = np.degrees(np.arctan2(display_points[i][1], display_points[i][0]))
+
+                    # Angle normalization
+                    prev_angle = prev_angle if prev_angle >= 0 else prev_angle + 360
+                    curr_angle = curr_angle if curr_angle >= 0 else curr_angle + 360
+
+                    angle_diff = min(abs(curr_angle - prev_angle),
+                                     abs(curr_angle - prev_angle + 360),
+                                     abs(curr_angle - prev_angle - 360))
+
+                    # Angle condition (6°)
+                    if angle_diff <= max_angle_diff:
+                        current_segment.append(display_points[i])
+                    else:
+                        if len(current_segment) > 1:
+                            segments.append(np.array(current_segment))
+                        current_segment = [display_points[i]]
+            elif current_segment:
+                if len(current_segment) > 1:
+                    segments.append(np.array(current_segment))
+                current_segment = []
+
+        # Add up last segment
+        if current_segment and len(current_segment) > 1:
+            segments.append(np.array(current_segment))
+
+        # Segment plotting
+        for segment in segments:
+            self.ax.plot(segment[:, 0],
+                         segment[:, 1],
+                         segment[:, 2],
+                         'k-', label='Trajectory' if segment is segments[0] else "",
+                         alpha=1)
+
+        # Generate and display ellipses and vectors
+        if self.ellipse_bool:
+            for i in range(0, len(filtered_points), self.stride):
+                pt = filtered_points[i]
+                t = normalized_t_vector[i]
+                b = normalized_b_vector[i]
+                n = normalized_n_vector[i]
+
+                ellipse_points = self.construct_half_ellipse(
+                    pt,
+                    n,
+                    b,
+                    t
+                )
                 self.plot_ellipse(ellipse_points, self.ax)
-
-        for i in range(0, len(display_points), self.stride):
-            # Get local vectors
-            t = normalized_t_vector[i]
-            b = normalized_b_vector[i]
-            n = normalized_n_vector[i]
 
             if self.vector_bool:
                 # Build direction vector
-                self.ax.quiver(display_points[i, 0],
-                               display_points[i, 1],
-                               display_points[i, 2],
+                self.ax.quiver(pt[0], pt[1], pt[2],
                                b[0], b[1], b[2],
                                color='red', alpha=1,
-                               label='Build direction' if i == 0 else "", normalize=True)
+                               label='Build direction' if i == 0 else "",
+                               normalize=True)
 
                 # Tangent direction vector
-                self.ax.quiver(display_points[i, 0],
-                               display_points[i, 1],
-                               display_points[i, 2],
-                               t[0],
-                               t[1],
-                               t[2],
+                self.ax.quiver(pt[0], pt[1], pt[2],
+                               t[0], t[1], t[2],
                                color='blue', alpha=1,
-                               label='Tangent direction' if i == 0 else "", normalize=True)
+                               label='Tangent direction' if i == 0 else "",
+                               normalize=True)
 
                 # Normal direction vector
-                self.ax.quiver(display_points[i, 0],
-                               display_points[i, 1],
-                               display_points[i, 2],
-                               n[0],
-                               n[1],
-                               n[2],
+                self.ax.quiver(pt[0], pt[1], pt[2],
+                               n[0], n[1], n[2],
                                color='green', alpha=1,
-                               label='Tool direction' if i == 0 else "", normalize=True)
+                               label='Tool direction' if i == 0 else "",
+                               normalize=True)
 
         # Set labels and title
         self.ax.set_xlabel('X')
@@ -360,7 +334,6 @@ class TrajectoryVisualizer:
         end_idx = self.layer_indices[max_layer]
         return start_idx, end_idx
 
-# Fonction pour appeler la fonction de visualisation principale;
     def visualize(self):
         """Main visualization method"""
         self.main_visualization()
