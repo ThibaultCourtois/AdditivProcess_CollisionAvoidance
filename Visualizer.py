@@ -230,7 +230,7 @@ class TrajectoryVisualizer:
             segments.append(np.array(current_segment))
 
         # Segment plotting
-        for segment in segments:
+        for segment_idx, segment in enumerate(segments):
             self.ax.plot(segment[:, 0],
                          segment[:, 1],
                          segment[:, 2],
@@ -238,42 +238,43 @@ class TrajectoryVisualizer:
                          alpha=1)
 
         # Generate and display ellipses and vectors
-        if self.ellipse_bool:
+
             for i in range(0, len(filtered_points), self.stride):
                 pt = filtered_points[i]
                 t = normalized_t_vector[i]
                 b = normalized_b_vector[i]
                 n = normalized_n_vector[i]
 
-                ellipse_points = self.construct_half_ellipse(
-                    pt,
-                    n,
-                    b,
-                    t
-                )
-                self.plot_ellipse(ellipse_points, self.ax)
+                if self.ellipse_bool:
+                    ellipse_points = self.construct_half_ellipse(
+                        pt,
+                        n,
+                        b,
+                        t
+                    )
+                    self.plot_ellipse(ellipse_points, self.ax)
 
-        if self.vector_bool:
-            # Build direction vector
-            self.ax.quiver(pt[0], pt[1], pt[2],
-                            b[0], b[1], b[2],
-                            color='red', alpha=1,
-                            label='Build direction' if i == 0 else "",
-                             normalize=True)
+                if self.vector_bool:
+                    # Build direction vector
+                    self.ax.quiver(pt[0], pt[1], pt[2],
+                                   b[0], b[1], b[2],
+                                   color='red', alpha=1,
+                                   label='Build direction' if (segment_idx ==0 and i == 0) else "",
+                                   normalize=True)
 
-            # Tangent direction vector
-            self.ax.quiver(pt[0], pt[1], pt[2],
-                            t[0], t[1], t[2],
-                            color='blue', alpha=1,
-                            label='Tangent direction' if i == 0 else "",
-                            normalize=True)
+                    # Tangent direction vector
+                    self.ax.quiver(pt[0], pt[1], pt[2],
+                                   t[0], t[1], t[2],
+                                   color='blue', alpha=1,
+                                   label='Tangent direction' if (segment_idx ==0 and i == 0) else "",
+                                   normalize=True)
 
-            # Normal direction vector
-            self.ax.quiver(pt[0], pt[1], pt[2],
-                            n[0], n[1], n[2],
-                            color='green', alpha=1,
-                            label='Tool direction' if i == 0 else "",
-                            normalize=True)
+                    # Normal direction vector
+                    self.ax.quiver(pt[0], pt[1], pt[2],
+                                   n[0], n[1], n[2],
+                                   color='green', alpha=1,
+                                   label='Tool direction' if (segment_idx ==0 and i == 0) else "",
+                                   normalize=True)
 
         # Set labels and title
         self.ax.set_xlabel('X')
