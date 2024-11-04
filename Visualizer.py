@@ -253,27 +253,27 @@ class TrajectoryVisualizer:
                 )
                 self.plot_ellipse(ellipse_points, self.ax)
 
-            if self.vector_bool:
-                # Build direction vector
-                self.ax.quiver(pt[0], pt[1], pt[2],
-                               b[0], b[1], b[2],
-                               color='red', alpha=1,
-                               label='Build direction' if i == 0 else "",
-                               normalize=True)
+        if self.vector_bool:
+            # Build direction vector
+            self.ax.quiver(pt[0], pt[1], pt[2],
+                            b[0], b[1], b[2],
+                            color='red', alpha=1,
+                            label='Build direction' if i == 0 else "",
+                             normalize=True)
 
-                # Tangent direction vector
-                self.ax.quiver(pt[0], pt[1], pt[2],
-                               t[0], t[1], t[2],
-                               color='blue', alpha=1,
-                               label='Tangent direction' if i == 0 else "",
-                               normalize=True)
+            # Tangent direction vector
+            self.ax.quiver(pt[0], pt[1], pt[2],
+                            t[0], t[1], t[2],
+                            color='blue', alpha=1,
+                            label='Tangent direction' if i == 0 else "",
+                            normalize=True)
 
-                # Normal direction vector
-                self.ax.quiver(pt[0], pt[1], pt[2],
-                               n[0], n[1], n[2],
-                               color='green', alpha=1,
-                               label='Tool direction' if i == 0 else "",
-                               normalize=True)
+            # Normal direction vector
+            self.ax.quiver(pt[0], pt[1], pt[2],
+                            n[0], n[1], n[2],
+                            color='green', alpha=1,
+                            label='Tool direction' if i == 0 else "",
+                            normalize=True)
 
         # Set labels and title
         self.ax.set_xlabel('X')

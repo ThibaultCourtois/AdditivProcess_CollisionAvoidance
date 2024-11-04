@@ -5,7 +5,7 @@ from Visualizer import TrajectoryVisualizer
 trajectory = TrajectoryAcquisition("Trajectoire_Schwarz.csv")
 
 # Create visualizer
-visualizer = TrajectoryVisualizer(trajectory, 90,[0,60], 1, True, False, 1)
+visualizer = TrajectoryVisualizer(trajectory, 90,[55,50], 1, False, True, 1)
 
 # Start visualization
 visualizer.visualize()
