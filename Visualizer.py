@@ -52,14 +52,30 @@ class TrajectoryVisualizer:
         self.revolute_display_angle = revolut_angle_display
 
         # Fixed parameters from project requirements
-        self.h_layer = 1.95  # mm (hauteur constante)
-        self.w_layer = 3  # mm (largeur constante)
-        self.L_seg = 0.32  # mm (longueur de segment)
+        self.h_layer = 1.95  # mm (constant height)
+        self.w_layer = 3  # mm (constant width)
+        self.L_seg = 0.32  # mm (segment length)
         self.scale_vectors = scale_vectors
+
+        # Tool visualization parameters
+        self.show_tool = False  # Toggle tool visualization
+        self.tool_type = 'cylinder'  # 'cylinder' or 'stl'
+        self.tool_radius = 5  # mm
+        self.tool_height = 50  # mm
+        self.nozzle_length = 10  # mm
+        self.tool_stl_path = None  # Path to STL file
+        self.current_tool_position = None  # Store clicked position
 
         # Setup figure and 3D axes
         self.fig = plt.figure(figsize=(12, 8))
         self.ax = self.fig.add_subplot(111, projection='3d')
+
+        # Add keyboard navigation parameters
+        self.current_point_index = None  # Index of current point in visible points list
+        self.visible_points = None  # List of visible points
+        self.visible_tools = None  # List of corresponding tool directions
+        # Connect keyboard events
+        self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
 
 
     #-------------------------------------------------------------------
@@ -143,6 +159,186 @@ class TrajectoryVisualizer:
         ax.add_collection3d(poly)
 
     #-------------------------------------------------------------------
+    # Tool Visualization Methods
+    #-------------------------------------------------------------------
+
+    def set_tool_visualization(self, show_tool=True, tool_type='cylinder'):
+        """
+        Configure tool visualization
+
+        Parameters:
+        -----------
+        show_tool : bool
+            Enable/disable tool visualization
+        tool_type : str
+            'cylinder' or 'stl'
+        """
+        self.show_tool = show_tool
+        self.tool_type = tool_type
+
+    def set_tool_parameters(self, radius=None, height=None, nozzle_length=None, stl_path=None):
+        """
+        Set tool visualization parameters
+
+        Parameters:
+        -----------
+        radius : float
+            Radius for cylinder visualization
+        height : float
+            Height for cylinder visualization
+        stl_path : str
+            Path to STL file for STL visualization
+        """
+        if radius is not None:
+            self.tool_radius = radius
+        if height is not None:
+            self.tool_height = height
+        if nozzle_length is not None:
+            self.nozzle_length = nozzle_length
+        if stl_path is not None:
+            self.tool_stl_path = stl_path
+
+    def update_tool_visualization(self):
+        """
+        Updates the tool visualization
+        """
+        # Clear previous tool visualization
+        if self.current_tool_position is not None:
+            # Remove surface plots
+            for collection in self.ax.collections:
+                if hasattr(collection, 'tool_surface') and collection.tool_surface:
+                    collection.remove()
+
+            # Remove tool lines
+            lines_to_remove = []
+            for line in self.ax.lines:
+                if hasattr(line, 'tool_line') and line.tool_line:
+                    lines_to_remove.append(line)
+            for line in lines_to_remove:
+                line.remove()
+
+        # Update tool visualization if enabled
+        if self.show_tool and self.current_point_index is not None:
+            position = self.visible_points[self.current_point_index]
+            direction = self.visible_tools[self.current_point_index]
+
+            if self.tool_type == 'cylinder':
+                self.visualize_simplified_tool(position, direction)
+
+            self.current_tool_position = position
+
+        self.fig.canvas.draw()
+
+    def create_tool_geometry(self, center, direction, radius=5, height=50, nozzle_length=3, n_points=32):
+        """
+        Create points for tool visualization with nozzle
+
+        Parameters:
+        -----------
+        center : array-like
+            Position of the tool tip
+        direction : array-like
+            Tool direction vector
+        radius : float
+            Radius of the cylinder
+        height : float
+            Height of the cylinder
+        nozzle_length : float
+            Length of the nozzle line
+        n_points : int
+            Number of points for cylinder discretization
+
+        Returns:
+        --------
+        cylinder_base : ndarray
+            Points forming the base of cylinder
+        cylinder_top : ndarray
+            Points forming the top of cylinder
+        nozzle_points : ndarray
+            Two points defining the nozzle line
+        """
+        # Normalize direction
+        direction = direction / np.linalg.norm(direction)
+
+        # Create circle points for cylinder
+        theta = np.linspace(0, 2 * np.pi, n_points)
+        x = radius * np.cos(theta)
+        y = radius * np.sin(theta)
+        z = np.zeros_like(theta)
+        circle_points = np.column_stack((x, y, z))
+
+        # Create orthonormal basis with direction as z-axis
+        z_axis = direction
+        x_axis = np.array([1, 0, 0])
+        if np.abs(np.dot(x_axis, z_axis)) > 0.9:
+            x_axis = np.array([0, 1, 0])
+        y_axis = np.cross(z_axis, x_axis)
+        x_axis = np.cross(y_axis, z_axis)
+
+        # Create rotation matrix
+        rotation_matrix = np.column_stack((x_axis, y_axis, z_axis))
+
+        # Transform circle points
+        cylinder_base = np.dot(circle_points, rotation_matrix.T)
+        cylinder_top = cylinder_base + height * direction
+
+        # Create nozzle points (from center to nozzle_length along direction)
+        nozzle_start = center
+        nozzle_end = center + nozzle_length * direction
+        nozzle_points = np.array([nozzle_start, nozzle_end])
+
+        # Translate cylinder to position (center - nozzle_length * direction to place cylinder above nozzle)
+        cylinder_base += (center + nozzle_length * direction)
+        cylinder_top += (center + nozzle_length * direction)
+
+        return cylinder_base, cylinder_top, nozzle_points
+
+    def visualize_simplified_tool(self, position, direction):
+        """
+        Visualize tool as semi-infinite cylinder with central nozzle line
+        """
+        # Create tool geometry
+        base_points, top_points, nozzle_points = self.create_tool_geometry(
+            position, direction,
+            radius=self.tool_radius,
+            height=self.tool_height,
+            nozzle_length=self.nozzle_length
+        )
+
+        # Plot cylinder surface
+        # Using plot_surface for the cylinder wall
+        theta = np.linspace(0, 2 * np.pi, len(base_points))
+        z = np.linspace(0, 1, 2)
+        theta, z = np.meshgrid(theta, z)
+
+        x = np.vstack((base_points[:, 0], top_points[:, 0]))
+        y = np.vstack((base_points[:, 1], top_points[:, 1]))
+        z = np.vstack((base_points[:, 2], top_points[:, 2]))
+
+        # Plot cylinder with transparency
+        surf = self.ax.plot_surface(x, y, z, color='gray', alpha=0.3)
+        surf.tool_surface = True  # Mark surface as belonging to tool
+
+        # Plot cylinder edges for better visibility
+        line1 = self.ax.plot(base_points[:, 0], base_points[:, 1], base_points[:, 2], 'k-', linewidth=0.5)[0]
+        line2 = self.ax.plot(top_points[:, 0], top_points[:, 1], top_points[:, 2], 'k-', linewidth=0.5)[0]
+        line1.tool_line = True
+        line2.tool_line = True
+
+        # Plot vertical lines at cylinder corners
+        for i in range(len(base_points)):
+            line = self.ax.plot([base_points[i, 0], top_points[i, 0]],
+                                [base_points[i, 1], top_points[i, 1]],
+                                [base_points[i, 2], top_points[i, 2]],
+                                'k-', linewidth=0.5)[0]
+            line.tool_line = True
+
+        # Plot nozzle line in black
+        line = self.ax.plot(nozzle_points[:, 0], nozzle_points[:, 1], nozzle_points[:, 2],
+                            'k-', linewidth=2.0)[0]
+        line.tool_line = True
+
+    #-------------------------------------------------------------------
     # Main Visualization Methods
     #-------------------------------------------------------------------
     def main_visualization(self):
@@ -164,6 +360,7 @@ class TrajectoryVisualizer:
         display_points = self.points[start_idx:end_idx]
         display_b_vector = self.build_directions[start_idx:end_idx]
         display_tool_vector = self.tool_directions[start_idx:end_idx]
+
 
         # Calculate angles for all points
         xy_angles = np.degrees(np.arctan2(display_points[:, 1], display_points[:, 0]))
@@ -335,7 +532,81 @@ class TrajectoryVisualizer:
         end_idx = self.layer_indices[max_layer]
         return start_idx, end_idx
 
+    def update_visible_points(self):
+        """
+        Updates the list of visible trajectory points
+        """
+        # Get visible points (using existing angle mask)
+        start_idx, end_idx = self.get_layer_points_range()
+        points = self.points[start_idx:end_idx]
+        tools = self.tool_directions[start_idx:end_idx]
+
+        # Calculate angles for visibility check
+        xy_angles = np.degrees(np.arctan2(points[:, 1], points[:, 0]))
+        xy_angles = np.where(xy_angles < 0, xy_angles + 360, xy_angles)
+        angle_mask = xy_angles <= self.revolute_display_angle
+
+        self.visible_points = points[angle_mask]
+        self.visible_tools = tools[angle_mask]
+
+        # Initialiser l'index au premier point si pas encore défini
+        if self.current_point_index is None and len(self.visible_points) > 0:
+            self.current_point_index = 0
+
+    #-------------------------------------------------------------------
+    # Events methods
+    #-------------------------------------------------------------------
+
+    def on_key_press(self, event):
+        """
+        Handle keyboard events
+        """
+        if self.visible_points is None:
+            self.update_visible_points()
+
+        if len(self.visible_points) == 0:
+            return
+
+        # Control detection through event modifier
+        ctrl_pressed = event.key.startswith('ctrl+') or (
+                    hasattr(event, 'mod') and event.mod & 2)  # 2 corresponds to CTRL
+
+        if event.key in ['4', 'ctrl+4']:  # Left equivalent
+            if ctrl_pressed:
+                # With Ctrl: move backward by stride points
+                new_index = max(0, self.current_point_index - 10)
+            else:
+                # Without Ctrl: move backward by one point
+                new_index = max(0, self.current_point_index - 1)
+
+            if new_index != self.current_point_index:
+                self.current_point_index = new_index
+                if self.show_tool:
+                    self.update_tool_visualization()
+
+        elif event.key in ['6', 'ctrl+6']:  # Right equivalent
+            if ctrl_pressed:
+                # With Ctrl: move forward by stride points
+                new_index = min(len(self.visible_points) - 1, self.current_point_index + 10)
+            else:
+                # Without Ctrl: move forward by one point
+                new_index = min(len(self.visible_points) - 1, self.current_point_index + 1)
+
+            if new_index != self.current_point_index:
+                self.current_point_index = new_index
+                if self.show_tool:
+                    self.update_tool_visualization()
+
+        elif event.key in ['8', 'ctrl+8']:  # Up equivalent
+            self.show_tool = not self.show_tool
+            self.update_tool_visualization()
+    #-------------------------------------------------------------------
+    # Main call
+    #-------------------------------------------------------------------
+
     def visualize(self):
         """Main visualization method"""
         self.main_visualization()
+        self.update_visible_points()
         plt.show()
+
