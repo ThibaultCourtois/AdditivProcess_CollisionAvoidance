@@ -1,7 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.backend_bases import Event
-from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from CollisionAvoidance import TrajectoryAcquisition
 
@@ -50,6 +48,7 @@ class TrajectoryVisualizer:
         self.display_layers = display_layers
         self.stride = stride
         self.revolute_display_angle = revolut_angle_display
+        self.angle_mask = None
 
         # Fixed parameters from project requirements
         self.h_layer = 1.95  # mm (constant height)
@@ -63,7 +62,6 @@ class TrajectoryVisualizer:
         self.tool_radius = 5  # mm
         self.tool_height = 50  # mm
         self.nozzle_length = 10  # mm
-        self.tool_stl_path = None  # Path to STL file
         self.current_tool_position = None  # Store clicked position
 
         # Setup figure and 3D axes
@@ -73,7 +71,9 @@ class TrajectoryVisualizer:
         # Add keyboard navigation parameters
         self.current_point_index = None  # Index of current point in visible points list
         self.visible_points = None  # List of visible points
-        self.visible_tools = None  # List of corresponding tool directions
+        self.visible_vectors = None
+        self.visible_layers = None
+
         # Connect keyboard events
         self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
 
@@ -162,21 +162,7 @@ class TrajectoryVisualizer:
     # Tool Visualization Methods
     #-------------------------------------------------------------------
 
-    def set_tool_visualization(self, show_tool=True, tool_type='cylinder'):
-        """
-        Configure tool visualization
-
-        Parameters:
-        -----------
-        show_tool : bool
-            Enable/disable tool visualization
-        tool_type : str
-            'cylinder' or 'stl'
-        """
-        self.show_tool = show_tool
-        self.tool_type = tool_type
-
-    def set_tool_parameters(self, radius=None, height=None, nozzle_length=None, stl_path=None):
+    def set_tool_parameters(self, radius=None, height=None, nozzle_length=None):
         """
         Set tool visualization parameters
 
@@ -195,8 +181,6 @@ class TrajectoryVisualizer:
             self.tool_height = height
         if nozzle_length is not None:
             self.nozzle_length = nozzle_length
-        if stl_path is not None:
-            self.tool_stl_path = stl_path
 
     def update_tool_visualization(self):
         """
@@ -220,13 +204,9 @@ class TrajectoryVisualizer:
         # Update tool visualization if enabled
         if self.show_tool and self.current_point_index is not None:
             position = self.visible_points[self.current_point_index]
-            direction = self.visible_tools[self.current_point_index]
-
-            if self.tool_type == 'cylinder':
-                self.visualize_simplified_tool(position, direction)
-
+            direction = self.visible_tool_vector[self.current_point_index]
+            self.visualize_simplified_tool(position, direction)
             self.current_tool_position = position
-
         self.fig.canvas.draw()
 
     def create_tool_geometry(self, center, direction, radius=5, height=50, nozzle_length=3, n_points=32):
@@ -346,44 +326,24 @@ class TrajectoryVisualizer:
         Main plotting function for trajectory visualization
 
         Displays:
-        - Complete trajectory path
+        - Complete or truncated trajectory path
         - Bead geometry (if enabled)
         - Direction vectors (if enabled)
         """
-        # Get range of points to display
-        start_idx, end_idx = self.get_layer_points_range()
-        if start_idx == end_idx:
-            print("No layers to display")
-            return
 
         # Get points and vectors for selected layers
-        display_points = self.points[start_idx:end_idx]
-        display_b_vector = self.build_directions[start_idx:end_idx]
-        display_tool_vector = self.tool_directions[start_idx:end_idx]
-
-
-        # Calculate angles for all points
-        xy_angles = np.degrees(np.arctan2(display_points[:, 1], display_points[:, 0]))
-        xy_angles = np.where(xy_angles < 0, xy_angles + 360, xy_angles)
-
-        # Create angle mask
-        angle_mask = xy_angles <= self.revolute_display_angle
-
-        # Apply mask to display points
-        filtered_points = display_points[angle_mask]
-        filtered_b_vector = display_b_vector[angle_mask]
-        filtered_tool_vector = display_tool_vector[angle_mask]
+        self.update_visible_points_vectors()
 
         # Calculate tangent vectors for filtered points
-        tangents = np.zeros_like(filtered_points)
-        tangents[:-1] = filtered_points[1:] - filtered_points[:-1]
+        tangents = np.zeros_like(self.visible_points)
+        tangents[:-1] = self.visible_points[1:] - self.visible_points[:-1]
         tangents[-1] = tangents[-2]
 
         # Normalize and scale vectors to fixed length
-        b_vector_norm = np.linalg.norm(filtered_b_vector, axis=1)
+        b_vector_norm = np.linalg.norm(self.visible_b_vector, axis=1)
         t_vector_norm = np.linalg.norm(tangents, axis=1)
 
-        normalized_b_vector = filtered_b_vector / b_vector_norm[:, np.newaxis]
+        normalized_b_vector = self.visible_b_vector / b_vector_norm[:, np.newaxis]
         normalized_t_vector = tangents / t_vector_norm[:, np.newaxis]
         normalized_n_vector = np.cross(normalized_t_vector, normalized_b_vector)
 
@@ -392,15 +352,15 @@ class TrajectoryVisualizer:
         current_segment = []
         max_angle_diff = 6
 
-        for i in range(len(display_points)):
-            if angle_mask[i]:
+        for i in range(len(self.points)):
+            if self.angle_mask[i]:
                 # First point of the segment ?
                 if not current_segment:
-                    current_segment.append(display_points[i])
+                    current_segment.append(self.points[i])
                 else:
                     # Angle calculation
                     prev_angle = np.degrees(np.arctan2(current_segment[-1][1], current_segment[-1][0]))
-                    curr_angle = np.degrees(np.arctan2(display_points[i][1], display_points[i][0]))
+                    curr_angle = np.degrees(np.arctan2(self.points[i][1], self.points[i][0]))
 
                     # Angle normalization
                     prev_angle = prev_angle if prev_angle >= 0 else prev_angle + 360
@@ -412,11 +372,11 @@ class TrajectoryVisualizer:
 
                     # Angle condition (6°)
                     if angle_diff <= max_angle_diff:
-                        current_segment.append(display_points[i])
+                        current_segment.append(self.points[i])
                     else:
                         if len(current_segment) > 1:
                             segments.append(np.array(current_segment))
-                        current_segment = [display_points[i]]
+                        current_segment = [self.points[i]]
             elif current_segment:
                 if len(current_segment) > 1:
                     segments.append(np.array(current_segment))
@@ -436,8 +396,8 @@ class TrajectoryVisualizer:
 
         # Generate and display ellipses and vectors
 
-            for i in range(0, len(filtered_points), self.stride):
-                pt = filtered_points[i]
+            for i in range(0, len(self.visible_points), self.stride):
+                pt = self.visible_points[i]
                 t = normalized_t_vector[i]
                 b = normalized_b_vector[i]
                 n = normalized_n_vector[i]
@@ -487,15 +447,15 @@ class TrajectoryVisualizer:
         self.ax.set_box_aspect([1, 1, 1])
 
         # For graphic axe scale purposes
-        x_range = np.ptp(display_points[:, 0])
-        y_range = np.ptp(display_points[:, 1])
-        z_range = np.ptp(display_points[:, 2])
+        x_range = np.ptp(self.visible_points[:, 0])
+        y_range = np.ptp(self.visible_points[:, 1])
+        z_range = np.ptp(self.visible_points[:, 2])
 
         # Set same scales for all axes
         max_range = np.array([x_range, y_range, z_range]).max()
-        mid_x = (display_points[:, 0].max() + display_points[:, 0].min()) * 0.5
-        mid_y = (display_points[:, 1].max() + display_points[:, 1].min()) * 0.5
-        mid_z = (display_points[:, 2].max() + display_points[:, 2].min()) * 0.5
+        mid_x = (self.visible_points[:, 0].max() + self.visible_points[:, 0].min()) * 0.5
+        mid_y = (self.visible_points[:, 1].max() + self.visible_points[:, 1].min()) * 0.5
+        mid_z = (self.visible_points[:, 2].max() + self.visible_points[:, 2].min()) * 0.5
         self.ax.set_xlim(mid_x - max_range * 0.5, mid_x + max_range * 0.5)
         self.ax.set_ylim(mid_y - max_range * 0.5, mid_y + max_range * 0.5)
         self.ax.set_zlim(mid_z - max_range * 0.5, mid_z + max_range * 0.5)
@@ -532,24 +492,32 @@ class TrajectoryVisualizer:
         end_idx = self.layer_indices[max_layer]
         return start_idx, end_idx
 
-    def update_visible_points(self):
+    def update_visible_points_vectors(self):
         """
         Updates the list of visible trajectory points
         """
         # Get visible points (using existing angle mask)
         start_idx, end_idx = self.get_layer_points_range()
+
+        if start_idx == end_idx:
+            print("No layers to display")
+            return
+
         points = self.points[start_idx:end_idx]
-        tools = self.tool_directions[start_idx:end_idx]
+        b_vector = self.build_directions[start_idx:end_idx]
+        tool_vector = self.tool_directions[start_idx:end_idx]
 
         # Calculate angles for visibility check
         xy_angles = np.degrees(np.arctan2(points[:, 1], points[:, 0]))
         xy_angles = np.where(xy_angles < 0, xy_angles + 360, xy_angles)
         angle_mask = xy_angles <= self.revolute_display_angle
 
+        self.points = points
+        self.angle_mask = angle_mask
         self.visible_points = points[angle_mask]
-        self.visible_tools = tools[angle_mask]
+        self.visible_b_vector = b_vector[angle_mask]
+        self.visible_tool_vector = tool_vector[angle_mask]
 
-        # Initialiser l'index au premier point si pas encore défini
         if self.current_point_index is None and len(self.visible_points) > 0:
             self.current_point_index = 0
 
@@ -562,7 +530,7 @@ class TrajectoryVisualizer:
         Handle keyboard events
         """
         if self.visible_points is None:
-            self.update_visible_points()
+            self.update_visible_points_vectors()
 
         if len(self.visible_points) == 0:
             return
@@ -607,6 +575,5 @@ class TrajectoryVisualizer:
     def visualize(self):
         """Main visualization method"""
         self.main_visualization()
-        self.update_visible_points()
         plt.show()
 
