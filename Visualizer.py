@@ -15,7 +15,7 @@ Features:
 
 class TrajectoryVisualizer:
     def __init__(self, trajectory_data: 'TrajectoryAcquisition', revolut_angle_display : float ,display_layers: list, stride: int,
-                 ellipse_bool: bool, vector_bool: bool, scale_vectors=0.1):
+                 ellipse_bool: bool, vector_bool: bool, show_collision_points_bool: bool, show_collision_points_segments_bool: bool, scale_vectors=0.1):
         """
         Initialize the trajectory visualizer
 
@@ -64,6 +64,10 @@ class TrajectoryVisualizer:
         self.nozzle_length = 10  # mm
         self.current_tool_position = None  # Store clicked position
 
+        # Calculus points visualization
+        self.show_collision_points = show_collision_points_bool
+        self.show_collision_points_segments = show_collision_points_segments_bool
+
         # Setup figure and 3D axes
         self.fig = plt.figure(figsize=(12, 8))
         self.ax = self.fig.add_subplot(111, projection='3d')
@@ -81,6 +85,34 @@ class TrajectoryVisualizer:
     #-------------------------------------------------------------------
     # Ellipse Generation and Visualization Methods
     #-------------------------------------------------------------------
+    def plot_collision_points(self, point, normal_vector, build_vector, is_last_layer: bool):
+        # Vectorized side points calculation
+        left_point = point + (self.w_layer / 2) * normal_vector
+        right_point = point - (self.w_layer / 2) * normal_vector
+
+        # Plot side points
+        self.ax.scatter([left_point[0], right_point[0]],
+                        [left_point[1], right_point[1]],
+                        [left_point[2], right_point[2]],
+                        color='darkcyan', marker='x', s=10, linewidth=.5)
+
+        if is_last_layer:
+            # Plot top point for last layer
+            top_point = point + self.h_layer * build_vector
+            self.ax.scatter(top_point[0], top_point[1], top_point[2],
+                            color='darkcyan', marker='x', s=10, linewidth=.5)
+
+            if self.show_collision_points_segments:
+                # Plot connecting segments
+                self.ax.plot3D([left_point[0], top_point[0]],
+                               [left_point[1], top_point[1]],
+                               [left_point[2], top_point[2]],
+                               '-', linewidth=.5, color="cyan")
+
+                self.ax.plot3D([right_point[0], top_point[0]],
+                               [right_point[1], top_point[1]],
+                               [right_point[2], top_point[2]],
+                               '-', linewidth=.5, color="cyan")
 
     def construct_half_ellipse(self, center, n_vector, b_vector, t_vector):
         """
@@ -334,6 +366,9 @@ class TrajectoryVisualizer:
         # Get points and vectors for selected layers
         self.update_visible_points_vectors()
 
+        # Get the layer indices
+        start_idx, end_idx = self.get_layer_points_range()
+
         # Calculate tangent vectors for filtered points
         tangents = np.zeros_like(self.visible_points)
         tangents[:-1] = self.visible_points[1:] - self.visible_points[:-1]
@@ -351,6 +386,14 @@ class TrajectoryVisualizer:
         segments = []
         current_segment = []
         max_angle_diff = 6
+
+        # Get the last displayed layer index and its ending point index
+        max_displayed_layer = max(self.display_layers)
+        last_layer_end_idx = self.layer_indices[max_displayed_layer]
+        if max_displayed_layer > 0:
+            last_layer_start_idx = self.layer_indices[max_displayed_layer - 1]
+        else:
+            last_layer_start_idx = 0
 
         for i in range(len(self.points)):
             if self.angle_mask[i]:
@@ -401,6 +444,13 @@ class TrajectoryVisualizer:
                 t = normalized_t_vector[i]
                 b = normalized_b_vector[i]
                 n = normalized_n_vector[i]
+
+                # Determine if point belongs to last layer
+                total_idx = start_idx + np.where(self.angle_mask)[0][i]
+                is_last_layer = (total_idx >= last_layer_start_idx) and (total_idx < last_layer_end_idx)
+
+                if self.show_collision_points:
+                    self.plot_collision_points(pt, n, b, is_last_layer)
 
                 if self.ellipse_bool:
                     ellipse_points = self.construct_half_ellipse(

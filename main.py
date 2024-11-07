@@ -5,7 +5,7 @@ from Visualizer import TrajectoryVisualizer
 trajectory = TrajectoryAcquisition("Trajectoire_Schwarz.csv")
 
 # Create visualizer
-visualizer = TrajectoryVisualizer(trajectory, 180,[10,11], 10, False, True, 1)
+visualizer = TrajectoryVisualizer(trajectory, 30,[40, 42], 1, False, False, True, True, 1)
 visualizer.set_tool_parameters(radius=5, height=50, nozzle_length=3)
 
 # Start visualization
