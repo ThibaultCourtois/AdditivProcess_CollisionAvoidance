@@ -16,8 +16,8 @@ tool_radius = 12.5  # mm
 nozzle_length = 17.0  # mm
 
 # Visualization parameters
-display_layers = [45, 60]  # Adjust according to the layers to display
-revolut_angle = 90
+display_layers = [40  , 60]  # Adjust according to the layers to display
+revolut_angle = 360
 stride = 3
 
 # -------------------------------------------------------------------
@@ -54,7 +54,7 @@ initial_visualizer = TrajectoryVisualizer(
     stride=stride,
     ellipse_bool=False,
     vector_bool=False,
-    show_collision_candidates_bool=False,
+    show_collision_candidates_bool=True,
     show_collision_candidates_segments_bool=False,
     show_problematic_trajectory_points_bool=True,
     collision_points=collision_points
@@ -96,8 +96,8 @@ optimized_collision_points = optimized_collision_manager.detect_initial_collisio
 
 # Create visualizer for optimized trajectory
 optimized_visualizer = TrajectoryVisualizer(
-    trajectory_manager=trajectory_manager,
-    collision_manager=collision_manager,
+    trajectory_manager=optimized_trajectory,
+    collision_manager=optimized_collision_manager,
     revolut_angle_display=revolut_angle,
     display_layers=display_layers,
     stride=stride,

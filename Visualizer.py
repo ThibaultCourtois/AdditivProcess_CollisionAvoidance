@@ -49,9 +49,10 @@ class TrajectoryVisualizer:
         # Tool visualization parameters
         self.show_tool = False
         self.tool_type = 'cylinder'
-        self.tool_radius = 5
-        self.tool_height = 50
-        self.nozzle_length = 10
+        self.tool_radius = 12.5
+        self.tool_height = 100
+        self.nozzle_length = 17
+        self.n_points = 16
         self.current_tool_position = None
 
         # Calculus points visualization
@@ -297,11 +298,11 @@ class TrajectoryVisualizer:
             position, direction,
             radius=self.tool_radius,
             height=self.tool_height,
-            nozzle_length=self.nozzle_length
+            nozzle_length=self.nozzle_length,
+            n_points = self.n_points
         )
 
         # Plot cylinder surface - simplest way but keeping radius constant
-        n_points = len(base_points)
         cylinder_x = np.vstack((base_points[:, 0], top_points[:, 0]))
         cylinder_y = np.vstack((base_points[:, 1], top_points[:, 1]))
         cylinder_z = np.vstack((base_points[:, 2], top_points[:, 2]))
