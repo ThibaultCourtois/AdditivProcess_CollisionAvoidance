@@ -18,6 +18,7 @@ class TrajectoryVisualizer:
                  ellipse_bool, vector_bool, show_collision_candidates_bool,
                  show_collision_candidates_segments_bool, show_problematic_trajectory_points_bool,
                  collision_points=None, scale_vectors=0.1):
+
         # Existing initialization code remains the same
         self.trajectory_data = trajectory_manager
         self.points = np.asarray(trajectory_manager.points)
@@ -25,6 +26,11 @@ class TrajectoryVisualizer:
         self.tool_directions = np.asarray(trajectory_manager.tool_directions)
         self.layer_indices = trajectory_manager.layer_indices
         self.extrusion_data = trajectory_manager.extrusion
+
+        # Nouveaux attributs pour stocker les bases locales
+        self.t_vectors = trajectory_manager.t_vectors
+        self.n_vectors = trajectory_manager.n_vectors
+        self.b_vectors = trajectory_manager.b_vectors
 
         # Visualization control
         self.ellipse_bool = ellipse_bool
@@ -83,8 +89,6 @@ class TrajectoryVisualizer:
         if self.collision_points is None and self.show_problematic_trajectory_points:
             self.collision_points = self.collision_manager.detect_initial_collisions()
         return self.collision_points
-
-
 
     #-------------------------------------------------------------------
     # Ellipse Generation and Visualization Methods
@@ -395,40 +399,27 @@ class TrajectoryVisualizer:
                          'k-', label='Trajectory' if segment is segments[0] else "",
                          alpha=1)
 
-        # === OPTIONAL VISUALIZATION ELEMENTS ===
+            # Mise à jour pour utiliser les vecteurs précalculés
         if self.vector_bool or self.ellipse_bool or self.show_collision_candidates:
-            # Calculate tangent vectors
-            tangents = np.zeros_like(self.visible_points)
-            tangents[:-1] = self.visible_points[1:] - self.visible_points[:-1]
-            tangents[-1] = tangents[-2]
-
-            # Calculate normalized basis vectors
-            b_vector_norm = np.linalg.norm(self.visible_b_vector, axis=1)
-            t_vector_norm = np.linalg.norm(tangents, axis=1)
-
-            normalized_b_vector = self.visible_b_vector / b_vector_norm[:, np.newaxis]
-            normalized_t_vector = tangents / t_vector_norm[:, np.newaxis]
-            normalized_n_vector = np.cross(normalized_t_vector, normalized_b_vector)
-
-            # Display optional elements based on flags
+            # Plus besoin de recalculer les vecteurs ici
+            # On utilise directement les vecteurs visibles mis à jour dans update_visible_points_vectors()
             if self.vector_bool:
-                if self.vector_bool:
-                    self.plot_direction_vectors(
-                        points=self.visible_points[::self.stride],
-                        t_vectors=normalized_t_vector[::self.stride],
-                        n_vectors=normalized_n_vector[::self.stride],
-                        b_vectors=normalized_b_vector[::self.stride],
-                        tool_vectors=self.visible_tool_vector[::self.stride]
-                    )
+                self.plot_direction_vectors(
+                    points=self.visible_points[::self.stride],
+                    t_vectors=self.visible_t_vector[::self.stride],
+                    n_vectors=self.visible_n_vector[::self.stride],
+                    b_vectors=self.visible_b_vector[::self.stride],
+                    tool_vectors=self.visible_tool_vector[::self.stride]
+                )
 
             if self.ellipse_bool:
                 # Plot ellipse geometry for each point
                 for i in range(0, len(self.visible_points), self.stride):
                     ellipse_points = self.construct_half_ellipse(
                         self.visible_points[i],
-                        normalized_n_vector[i],
-                        normalized_b_vector[i],
-                        normalized_t_vector[i]
+                        self.visible_n_vector[i],
+                        self.visible_b_vector[i],
+                        self.visible_t_vector[i]
                     )
                     self.plot_ellipse(ellipse_points, self.ax)
 
@@ -439,48 +430,83 @@ class TrajectoryVisualizer:
                     is_last_layer = (total_idx >= last_layer_start_idx) and (total_idx < last_layer_end_idx)
                     self.plot_collision_points(
                         self.visible_points[i],
-                        normalized_n_vector[i],
-                        normalized_b_vector[i],
+                        self.visible_n_vector[i],
+                        self.visible_t_vector[i],
                         is_last_layer
                     )
 
         # After plotting the trajectory but before vectors/ellipses
-        if self.show_problematic_trajectory_points and self.collision_points is not None:
-            # Get indices for the selected layers
-            start_idx, end_idx = self.get_layer_points_range()
+        if self.show_problematic_trajectory_points:
+            # Utiliser verify_collisions à la place
+            collision_count, residual_points = self.collision_manager.verify_collisions()
 
-            # Get all collision indices
-            all_collision_indices = np.where(self.collision_points)[0]
+            if len(residual_points) > 0:  # S'il y a des points à visualiser
+                # Get indices for the selected layers
+                start_idx, end_idx = self.get_layer_points_range()
 
-            # Filter only the collisions within our layer range
-            layer_mask = (all_collision_indices >= start_idx) & (all_collision_indices < end_idx)
-            layer_collision_indices = all_collision_indices[layer_mask]
+                # Filter residual points within our layer range
+                layer_mask = (np.array(residual_points) >= start_idx) & (np.array(residual_points) < end_idx)
+                layer_residual_points = np.array(residual_points)[layer_mask]
 
-            # Apply angle filtering
-            collision_points = self.trajectory_data.points[layer_collision_indices]
-            collision_angles = np.degrees(np.arctan2(collision_points[:, 1], collision_points[:, 0]))
-            collision_angles = np.where(collision_angles < 0, collision_angles + 360, collision_angles)
-            angle_mask = collision_angles <= self.revolute_display_angle
+                # Apply angle filtering
+                residual_coordinates = self.trajectory_data.points[layer_residual_points]
+                collision_angles = np.degrees(np.arctan2(residual_coordinates[:, 1], residual_coordinates[:, 0]))
+                collision_angles = np.where(collision_angles < 0, collision_angles + 360, collision_angles)
+                angle_mask = collision_angles <= self.revolute_display_angle
 
-            # Filter collision points by angle
-            final_collision_points = collision_points[angle_mask]
+                # Filter collision points by angle
+                final_collision_points = residual_coordinates[angle_mask]
+                final_point_indices = layer_residual_points[angle_mask]
 
-            print(f"Total number of collision points: {np.sum(self.collision_points)}")
-            print(f"Number of collision points in selected layers: {len(layer_collision_indices)}")
-            print(f"Number of collision points after angle filtering: {len(final_collision_points)}")
+                print(f"Total number of residual collisions: {collision_count}")
+                print(f"Number of collisions in selected layers: {len(layer_residual_points)}")
+                print(f"Number of visible collisions after angle filtering: {len(final_collision_points)}")
+                print(f"Points with collisions: {final_point_indices.tolist()}")
 
-            if len(final_collision_points) > 0:
-                self.ax.scatter(
-                    final_collision_points[:, 0],
-                    final_collision_points[:, 1],
-                    final_collision_points[:, 2],
-                    color='red',
-                    s=1,
-                    marker='o',
-                    label='Problematic trajectory points',
-                    zorder=5
-                )
+                if len(final_collision_points) > 0:
+                    # Visualiser les points problématiques
+                    self.ax.scatter(
+                        final_collision_points[:, 0],
+                        final_collision_points[:, 1],
+                        final_collision_points[:, 2],
+                        color='red',
+                        s=20,
+                        marker='x',
+                        label='Residual collisions',
+                        zorder=10,
+                        linewidth=1
+                    )
 
+                    # Afficher les bases locales pour chaque point résiduel
+                    for idx in final_point_indices:
+                        point = self.trajectory_data.points[idx]
+                        t_vec = self.t_vectors[idx]
+                        n_vec = self.n_vectors[idx]
+                        b_vec = self.b_vectors[idx]
+
+                        # Mise à l'échelle des vecteurs pour la visualisation
+                        scale = 5.0  # Ajuster cette valeur selon besoin
+
+                        # Tracer les vecteurs de la base locale
+                        self.ax.quiver(point[0], point[1], point[2],
+                                       t_vec[0], t_vec[1], t_vec[2],
+                                       color='blue', alpha=1, length=scale,
+                                       label='t' if idx == final_point_indices[0] else '')
+                        self.ax.quiver(point[0], point[1], point[2],
+                                       n_vec[0], n_vec[1], n_vec[2],
+                                       color='green', alpha=1, length=scale,
+                                       label='n' if idx == final_point_indices[0] else '')
+                        self.ax.quiver(point[0], point[1], point[2],
+                                       b_vec[0], b_vec[1], b_vec[2],
+                                       color='red', alpha=1, length=scale,
+                                       label='b' if idx == final_point_indices[0] else '')
+
+                        # Ajouter également le vecteur outil actuel
+                        tool_vec = self.trajectory_data.tool_directions[idx]
+                        self.ax.quiver(point[0], point[1], point[2],
+                                       tool_vec[0], tool_vec[1], tool_vec[2],
+                                       color='orange', alpha=1, length=scale,
+                                       label='tool' if idx == final_point_indices[0] else '')
         # Set labels and title
         self.ax.set_xlabel('X')
         self.ax.set_ylabel('Y')
@@ -541,20 +567,24 @@ class TrajectoryVisualizer:
         return start_idx, end_idx
 
     def update_visible_points_vectors(self):
-        """Updates visible points with stride applied early"""
+        """Met à jour les points et vecteurs visibles en appliquant les filtres"""
         start_idx, end_idx = self.get_layer_points_range()
 
         if start_idx == end_idx:
             print("No layers to display")
             return
 
-        # Apply stride early in the process
+        # Appliquer le stride tôt dans le processus
         indices = np.arange(start_idx, end_idx)
         points = self.points[indices]
-        b_vector = self.build_directions[indices]
+
+        # Utiliser directement les vecteurs précalculés
+        t_vector = self.t_vectors[indices]
+        n_vector = self.n_vectors[indices]
+        b_vector = self.b_vectors[indices]
         tool_vector = self.tool_directions[indices]
 
-        # Calculate angles for visibility check
+        # Calculer les angles pour le masque de visibilité
         xy_angles = np.degrees(np.arctan2(points[:, 1], points[:, 0]))
         xy_angles = np.where(xy_angles < 0, xy_angles + 360, xy_angles)
         angle_mask = xy_angles <= self.revolute_display_angle
@@ -562,6 +592,8 @@ class TrajectoryVisualizer:
         self.points = points
         self.angle_mask = angle_mask
         self.visible_points = points[angle_mask][::self.stride]
+        self.visible_t_vector = t_vector[angle_mask][::self.stride]
+        self.visible_n_vector = n_vector[angle_mask][::self.stride]
         self.visible_b_vector = b_vector[angle_mask][::self.stride]
         self.visible_tool_vector = tool_vector[angle_mask][::self.stride]
 

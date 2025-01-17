@@ -86,6 +86,7 @@ class CollisionAvoidance:
     def __init__(self, trajectory_path, bead_width, bead_height, tool_radius, tool_length):
         # Create trajectory manager instance
         self.trajectory = TrajectoryManager(trajectory_path)
+        self.trajectory.compute_and_store_local_bases()  # Calcul des bases au chargement
 
         # Rest of the initialization remains the same
         self.collision_candidates_generator = CollisionCandidatesGenerator()
@@ -180,22 +181,50 @@ class CollisionAvoidance:
         if self._initial_collisions_detected:
             return self._collision_points
 
-        t_vec, n_vec, b_vec, tool_vec = self.trajectory.calculate_local_basis()
-
+        # Utiliser directement les bases pré-calculées
         for layer_idx in range(len(self.trajectory.layer_indices)):
             layer_points = self.trajectory.get_layer_points(layer_idx)
             self.collision_candidates_generator.generate_collision_candidates_per_layer(
                 points=layer_points,
-                normal_vectors=n_vec[layer_idx],
-                build_vectors=b_vec[layer_idx],
+                normal_vectors=self.trajectory.n_vectors[layer_idx],
+                build_vectors=self.trajectory.b_vectors[layer_idx],
                 layer_index=layer_idx,
                 is_last_layer=(layer_idx == len(self.trajectory.layer_indices) - 1)
             )
 
-        self._collision_points = self.check_collisions(tool_vec)
+        self._collision_points = self.check_collisions(self.trajectory.tool_vectors)
         self._initial_collisions_detected = True
 
         return self._collision_points
+
+    def verify_collisions(self, updated_tool_vectors=None):
+        """Vérifie les collisions sur l'ensemble de la trajectoire avec les vecteurs outils actuels"""
+        collision_count = 0
+        residual_collisions = []
+
+        # Si pas de vecteurs fournis, utiliser ceux de la trajectoire
+        tool_vectors = updated_tool_vectors if updated_tool_vectors is not None else self.trajectory.tool_vectors
+
+        # Check initial collisions
+        initial_collision_points = np.where(self._collision_points)[0]
+
+        for point_idx in initial_collision_points:
+            if point_idx in self.collision_candidates_dict:
+                # Recalculer la distance avec le vecteur outil actuel
+                distances = self.compute_point_cylinder_distances(
+                    self.collision_candidates_dict[point_idx],
+                    self.tool.get_cylinder_start(
+                        self.trajectory.points[point_idx],
+                        tool_vectors[point_idx]
+                    ),
+                    tool_vectors[point_idx]
+                )
+
+                if np.any(distances < self.tool.radius):
+                    collision_count += 1
+                    residual_collisions.append(point_idx)
+
+        return collision_count, residual_collisions
 
     @staticmethod
     def compute_point_cylinder_distances(points, cylinder_start, cylinder_axis):
@@ -216,40 +245,21 @@ class CollisionAvoidance:
         return distances
 
     def process_trajectory(self):
-        """Main function for collision avoidance processing"""
-        start_time = time.time()
+        """Fonction principale de traitement de la trajectoire"""
         print("Trajectory processing...")
+        start_time = time.time()
 
-        # Vector acquisition
-        t_vec, n_vec, b_vec, tool_vec = self.trajectory.calculate_local_basis()
+        # Utiliser directement les vecteurs de base pré-calculés
+        t_vec = self.trajectory.t_vectors
+        n_vec = self.trajectory.n_vectors
+        b_vec = self.trajectory.b_vectors
+        tool_vec = self.trajectory.tool_vectors.copy()
+        updated_tool_vec = tool_vec.copy()
 
-        # Initialisation des statistiques
-        unresolved_points_data = {}
-        start_transition_points = 0
-        resolved_transition_points = 0
+        # Détection des collisions initiales
+        trajectory_points_colliding = self.detect_initial_collisions()
 
-        # Use existing collision detection results if available
-        if not self._initial_collisions_detected:
-            print("\nCollision candidates generation...")
-            for layer_idx in range(len(self.trajectory.layer_indices)):
-                layer_points = self.trajectory.get_layer_points(layer_idx)
-                self.collision_candidates_generator.generate_collision_candidates_per_layer(
-                    points=layer_points,
-                    normal_vectors=n_vec[layer_idx],
-                    build_vectors=b_vec[layer_idx],
-                    layer_index=layer_idx,
-                    is_last_layer=(layer_idx == len(self.trajectory.layer_indices) - 1)
-                )
-
-            generation_time = time.time() - start_time
-            print(f"\nGeneration execution time: {generation_time:.2f} seconds")
-
-            print("\nInitial collision detection...")
-            trajectory_points_colliding = self.check_collisions(tool_vec)
-        else:
-            print("\nUsing existing collision detection results...")
-            trajectory_points_colliding = self._collision_points
-
+        # Points problématiques
         problematic_points = np.where(trajectory_points_colliding)[0]
         print(f"\nNumber of initial trajectory points colliding: {len(problematic_points)}")
 
@@ -257,126 +267,84 @@ class CollisionAvoidance:
             print("No collisions to resolve")
             return tool_vec
 
-        # Iterative collision resolution
-        updated_tool_vec = tool_vec.copy()
+        # Résolution des collisions
         total_resolved = 0
+        correction_angles = []  # Pour calculer la moyenne
+        print("\nStarting collision resolution:")
+        print("-" * 50)
 
-        initial_angle_range = np.pi / 6  # 30 degrés
-        max_angle_range = np.pi  # 90 degrés
-        angle_increment = np.pi / 12  # 15 degrés
-
+        # Traitement de chaque point problématique
         for point_idx in problematic_points:
             if point_idx not in self.collision_points_dict:
+                print(f"Point {point_idx}: Skipped (no collision data)")
                 continue
 
-            # Get all candidates for this point
-            all_candidates = self.collision_candidates_dict[point_idx]
-            collision_points = self.collision_points_dict[point_idx]
+            print(f"\nProcessing point {point_idx}:")
 
-            # Initial angle calculation
-            current_angle = np.arctan2(np.dot(tool_vec[point_idx], n_vec[point_idx]),
-                                       np.dot(tool_vec[point_idx], t_vec[point_idx]))
-
-            # Point analysis
-            analysis = self.analyze_problematic_point(
-                point_idx, collision_points,
-                t_vec[point_idx], n_vec[point_idx],
-                current_angle
+            # Angle initial
+            initial_angle = np.arctan2(
+                np.dot(updated_tool_vec[point_idx], b_vec[point_idx]),
+                np.dot(updated_tool_vec[point_idx], n_vec[point_idx])
             )
 
-            # Transition points check
-            is_transition = self.is_transition_point(collision_points, t_vec[point_idx], n_vec[point_idx])
-            if is_transition:
-                start_transition_points += 1
-
-            # Increasing angle range
-            angle_range = initial_angle_range
-            new_angle = None
-
-            while new_angle is None and angle_range <= max_angle_range:
-                new_angle = self.calculate_tilt_angle(
-                    point_idx,
-                    collision_points,
-                    all_candidates,
-                    t_vec[point_idx],
-                    n_vec[point_idx],
-                    updated_tool_vec[point_idx],
-                    angle_range
-                )
-
-                if new_angle is None:
-                    angle_range += angle_increment
+            # Tentative de résolution
+            new_angle = self.calculate_tilt_angle(
+                point_idx,
+                self.collision_points_dict[point_idx],
+                self.collision_candidates_dict[point_idx],
+                t_vec[point_idx],
+                n_vec[point_idx],
+                b_vec[point_idx],
+                updated_tool_vec[point_idx]
+            )
 
             if new_angle is not None:
-                # Update tool vector with new angle
+                # Mise à jour du vecteur outil
                 updated_tool_vec[point_idx] = (
-                        t_vec[point_idx] * np.cos(new_angle) +
-                        n_vec[point_idx] * np.sin(new_angle)
+                        n_vec[point_idx] * np.cos(new_angle) +
+                        b_vec[point_idx] * np.sin(new_angle)
                 )
 
-                # Verify the new orientation resolves all collisions
-                cylinder_start = self.tool.get_cylinder_start(
-                    self.trajectory.points[point_idx],
-                    updated_tool_vec[point_idx]
-                )
-
+                # Vérification de la résolution
                 distances = self.compute_point_cylinder_distances(
-                    all_candidates,
-                    cylinder_start,
+                    self.collision_candidates_dict[point_idx],
+                    self.tool.get_cylinder_start(
+                        self.trajectory.points[point_idx],
+                        updated_tool_vec[point_idx]
+                    ),
                     updated_tool_vec[point_idx]
                 )
 
-                angle_sector = new_angle - current_angle
-                while angle_sector > np.pi:
-                    angle_sector -= 2 * np.pi
-                while angle_sector < -np.pi:
-                    angle_sector += 2 * np.pi
-
-                if not np.any(distances < self.tool.radius):
+                if np.all(distances >= self.tool.radius):
                     total_resolved += 1
-                    if is_transition:
-                        resolved_transition_points += 1
+                    # Calcul de l'amplitude de correction
+                    angle_diff = new_angle - initial_angle
+                    while angle_diff > np.pi:
+                        angle_diff -= 2 * np.pi
+                    while angle_diff < -np.pi:
+                        angle_diff += 2 * np.pi
+
+                    correction_angles.append(abs(angle_diff))
+                    print(f"Point {point_idx}: RESOLVED")
+                    print(f"   Correction amplitude: {np.degrees(abs(angle_diff)):.2f}°")
                 else:
-                    unresolved_points_data[point_idx] = {
-                        'analysis': analysis,
-                        'is_transition': is_transition,
-                        'num_collisions': np.sum(distances < self.tool.radius)
-                    }
+                    print(f"Point {point_idx}: FAILED (Collision still present after angle correction)")
             else:
-                print(f"Warning: No valid angle found for point {point_idx}")
-                unresolved_points_data[point_idx] = {
-                    'analysis': analysis,
-                    'is_transition': is_transition,
-                    'reason': 'No valid angle found'
-                }
+                print(f"Point {point_idx}: FAILED (No valid angle found)")
 
-        # Final statistics
-        resolution_time = time.time() - start_time
-        print(f"\nTotal points resolved: {total_resolved}/{len(problematic_points)}")
-        print(f"Total execution time: {resolution_time:.2f} seconds")
+        final_collision_count, residual_points = self.verify_collisions(updated_tool_vec)
+        print("\n" + "-" * 50)
+        print(f"Total points resolved: {len(problematic_points) - final_collision_count}/{len(problematic_points)}")
+        print(
+            f"Resolution rate: {((len(problematic_points) - final_collision_count) / len(problematic_points) * 100):.1f}%")
+        if correction_angles:
+            mean_correction = np.degrees(np.mean(correction_angles))
+            print(f"Average correction amplitude: {mean_correction:.2f}°")
+        print(f"Total execution time: {time.time() - start_time:.2f} seconds")
 
-        print(f"\nTransition Points Statistics:")
-        print(f"Initial transition points: {start_transition_points}")
-        print(f"Resolved transition points: {resolved_transition_points}")
-
-        print(f"\nUnresolved Points Analysis:")
-        print(f"Total unresolved points: {len(unresolved_points_data)}")
-
-        transition_unresolved = sum(1 for data in unresolved_points_data.values()
-                                    if data['is_transition'])
-        print(f"Unresolved transition points: {transition_unresolved}")
-
-        # Unresolved points analysis
-        if unresolved_points_data:
-            print("\nDetails of unresolved points:")
-            for point_idx, data in unresolved_points_data.items():
-                print(f"\nPoint {point_idx}:")
-                print(f"Is transition point: {data['is_transition']}")
-                if 'num_collisions' in data:
-                    print(f"Remaining collisions: {data['num_collisions']}")
-                print(f"Angle range: [{np.min(data['analysis']['angles']):.1f}°, "
-                      f"{np.max(data['analysis']['angles']):.1f}°]")
-                print(f"Point density: {data['analysis']['density']:.2f} points/degree")
+        print(f"\nVerification finale:")
+        print(f"Nombre de collisions résiduelles: {final_collision_count}")
+        print(f"Points problématiques: {residual_points}")
 
         return updated_tool_vec
 
@@ -384,426 +352,96 @@ class CollisionAvoidance:
     # Algorithm for tool_angle modification using auxiliary functions
     # ----------------------------------------------------------------------------------
 
-    def calculate_tilt_angle(self, point_idx, collision_points, all_candidate_points, t, n, tool_vec, angle_range):
+    def calculate_tilt_angle(self, point_idx, collision_points, all_candidate_points, t, n, b, tool_vec):
         """
-        Calcule l'angle optimal pour orienter l'outil en évitant les collisions.
+        Calcule l'angle de tilt minimal pour éviter les collisions en projetant les points dans le plan (n,b)
+        de manière itérative en minimisant le nombre de collisions.
         """
         current_point = self.trajectory.points[point_idx]
-        current_angle = np.arctan2(np.dot(tool_vec, n), np.dot(tool_vec, t))
+        max_iterations = 10
 
-        # Type of problematic point
-        is_transition = self.is_transition_point(collision_points, t, n)
+        # Angles de test non linéaires
+        angles = np.concatenate([
+            np.linspace(0.1, np.pi / 6, 15),  # 15 points entre 0.1 et 30°
+            np.linspace(np.pi / 6, np.pi / 2, 10)  # 10 points entre 30° et 90°
+        ])
 
-        # 1. Angle range for testing calcultation
-        limiting_angles = self.calculate_limiting_angles(collision_points, current_point, t, n, angle_range)
-        if limiting_angles is None or len(limiting_angles) == 0:
-            return None
+        # Point de départ : vecteur outil actuel
+        best_tool_vec = tool_vec
+        current_angle = np.arctan2(np.dot(tool_vec, b), np.dot(tool_vec, n))
+        min_collisions = len(all_candidate_points)  # Pire cas initial
 
-        # 2. Cost function definition
-        def cost_function(angle):
-            test_tool = t * np.cos(angle) + n * np.sin(angle)
-
-            # Collision cost
-            distances = self.compute_point_cylinder_distances(
-                all_candidate_points,
-                self.tool.get_cylinder_start(current_point, test_tool),
-                test_tool
-            )
-            collision_cost = np.sum(np.maximum(0, self.tool.radius - distances))
-
-            # Weight adjustment depending on problematic point
-            if is_transition:
-                return (20.0 * collision_cost +
-                        0.5 * abs(angle - current_angle) +
-                        8.0 * self.compute_continuity_cost(point_idx, angle))
+        for iteration in range(max_iterations):
+            if iteration == 0:
+                print(f"    Initial attempt...")
             else:
-                return (10.0 * collision_cost +
-                        2.0 * abs(angle - current_angle) +
-                        1.0 * self.compute_continuity_cost(point_idx, angle))
+                print(f"    Iteration {iteration} (with {min_collisions} collisions)...")
 
-        # 3. Binary search of optimal tilt angle using cost unction and test angle range
-        best_angle = self.binary_search_angles(limiting_angles, cost_function)
+            # Analyse de la distribution des points dans les quadrants
+            centered_points = collision_points - current_point
+            n_coords = np.dot(centered_points, n)
+            b_coords = np.dot(centered_points, b)
+            projected_points = np.column_stack((n_coords, b_coords))
 
-        # 4. Final verification
-        if best_angle is not None:
-            test_tool = t * np.cos(best_angle) + n * np.sin(best_angle)
-            final_distances = self.compute_point_cylinder_distances(
-                all_candidate_points,
-                self.tool.get_cylinder_start(current_point, test_tool),
-                test_tool
-            )
+            quad1_count = 0  # Quadrant sens horaire
+            quad2_count = 0  # Quadrant sens anti-horaire
 
-            if np.all(final_distances >= self.tool.radius):
-                return best_angle
+            for point in projected_points:
+                point_angle = np.arctan2(point[1], point[0])
+                angle_diff = point_angle - current_angle
+
+                # Normaliser entre -π et π
+                while angle_diff > np.pi:
+                    angle_diff -= 2 * np.pi
+                while angle_diff < -np.pi:
+                    angle_diff += 2 * np.pi
+
+                if 0 < angle_diff < np.pi / 2:
+                    quad1_count += 1
+                elif -np.pi / 2 < angle_diff < 0:
+                    quad2_count += 1
+
+            # Direction préférentielle
+            preferred_direction = 1 if quad2_count > quad1_count else -1
+
+            # Test des deux quadrants
+            found_solution = False
+            best_angle_this_iter = current_angle
+
+            for direction in [preferred_direction, -preferred_direction]:
+                for test_angle_offset in angles:
+                    test_angle = current_angle + direction * test_angle_offset
+                    test_tool_vec = n * np.cos(test_angle) + b * np.sin(test_angle)
+
+                    # Vérifier les collisions
+                    distances = self.compute_point_cylinder_distances(
+                        all_candidate_points,
+                        self.tool.get_cylinder_start(current_point, test_tool_vec),
+                        test_tool_vec
+                    )
+
+                    num_collisions = np.sum(distances < self.tool.radius)
+
+                    # Si solution sans collision trouvée
+                    if num_collisions == 0:
+                        return test_angle
+
+                    # Sinon, garder le meilleur cas
+                    if num_collisions < min_collisions:
+                        min_collisions = num_collisions
+                        best_angle_this_iter = test_angle
+                        best_tool_vec = test_tool_vec
+
+            # Mise à jour pour la prochaine itération
+            if best_angle_this_iter == current_angle:
+                # Aucune amélioration trouvée
+                break
+
+            current_angle = best_angle_this_iter
 
         return None
 
-    def calculate_limiting_angles(self, collision_points, center, t, n, angle_range=np.pi / 6):
-        if len(collision_points) < 10:
-            angles = np.array([np.arctan2(np.dot(vec, n), np.dot(vec, t))
-                               for vec in collision_points])
-            mean_angle = np.mean(angles)
-
-            # Test des deux côtés
-            opposite_angles = [mean_angle + np.pi - angle_range, mean_angle + np.pi + angle_range]
-            same_side_angles = [mean_angle - angle_range, mean_angle + angle_range]
-
-            # Évaluer le meilleur côté
-            best_score = -1
-            best_angles = opposite_angles
-
-            for test_angles in [opposite_angles, same_side_angles]:
-                test_tool = t * np.cos(np.mean(test_angles)) + n * np.sin(np.mean(test_angles))
-                distances = self.compute_point_cylinder_distances(
-                    collision_points,
-                    self.tool.get_cylinder_start(center, test_tool),
-                    test_tool
-                )
-                score = np.min(distances) / self.tool.radius
-                if score > best_score:
-                    best_score = score
-                    best_angles = test_angles
-
-            return np.array(best_angles)
-
-        # For standard points, we analyse the collision_points repartition and we chose the opposite direction
-        vectors_to_collisions = collision_points - center
-        mean_vector = np.mean(vectors_to_collisions, axis=0)
-        mean_direction = mean_vector / np.linalg.norm(mean_vector)
-
-        t_proj = np.dot(mean_direction, t)
-        n_proj = np.dot(mean_direction, n)
-        base_angle = np.arctan2(n_proj, t_proj) + np.pi
-
-        return np.array([base_angle - angle_range, base_angle + angle_range])
-
-    def calculate_transition_angles(self, collision_points, center, t, n):
-        """
-        Calcule les secteurs angulaires sans collision pour les points de transition
-        """
-        vectors_to_collisions = collision_points - center
-        angles = np.array([np.arctan2(np.dot(vec, n), np.dot(vec, t))
-                           for vec in vectors_to_collisions])
-
-        sorted_angles = np.sort(angles)
-
-        # Biggest gap without collision
-        gaps = np.diff(np.append(sorted_angles, sorted_angles[0] + 2 * np.pi))
-        max_gap_idx = np.argmax(gaps)
-
-        # Middle of the biggest gap
-        optimal_angle = sorted_angles[max_gap_idx] + gaps[max_gap_idx] / 2
-        if optimal_angle > 2 * np.pi:
-            optimal_angle -= 2 * np.pi
-
-        sector_size = min(gaps[max_gap_idx] / 3, np.pi / 4)  # On prend le tiers du gap ou 45° max
-        return [optimal_angle - sector_size, optimal_angle + sector_size]
-
-    def compute_continuity_cost(self, point_idx, angle):
-        """
-        Calculate continuity cost
-        """
-        cost = 0
-        window_size = 3
-
-        # Checking previous points
-        for i in range(1, window_size + 1):
-            if point_idx - i >= 0:
-                prev_tool = self.trajectory.tool_directions[point_idx - i]
-                prev_angle = np.arctan2(
-                    np.dot(prev_tool, self.trajectory.build_directions[point_idx - i]),
-                    np.dot(prev_tool, self.trajectory.tool_directions[point_idx - i])
-                )
-                cost += (1.0 / i) * abs(angle - prev_angle)
-
-        # Checking next points
-        for i in range(1, window_size + 1):
-            if point_idx + i < len(self.trajectory.points):
-                next_tool = self.trajectory.tool_directions[point_idx + i]
-                next_angle = np.arctan2(
-                    np.dot(next_tool, self.trajectory.build_directions[point_idx + i]),
-                    np.dot(next_tool, self.trajectory.tool_directions[point_idx + i])
-                )
-                cost += (1.0 / i) * abs(angle - next_angle)
-
-        return cost
-
-    def binary_search_angles(self, angles, cost_function, n_intervals=10):
-        """
-        Optimized research of the optimal angle
-        """
-        if angles is None:
-            return None
-
-        best_angle = None
-        min_cost = float('inf')
-
-        # Normalisation des angles entre 0 et 2π
-        angles = np.sort(angles) % (2 * np.pi)
-
-        # Regroupement des angles proches (optimisation)
-        grouped_angles = []
-        current_group = [angles[0]]
-
-        for angle in angles[1:]:
-            if abs(angle - current_group[-1]) < np.deg2rad(5):
-                current_group.append(angle)
-            else:
-                grouped_angles.append(np.mean(current_group))
-                current_group = [angle]
-        if current_group:
-            grouped_angles.append(np.mean(current_group))
-
-        # Création des intervalles optimisés
-        intervals = []
-        for i in range(0, len(grouped_angles), 2):
-            if i + 1 < len(grouped_angles):
-                start, end = grouped_angles[i], grouped_angles[i + 1]
-                if start > end:
-                    # Gestion du passage par 0
-                    if end > np.pi:
-                        intervals.append((start, end))
-                    else:
-                        intervals.append((start, 2 * np.pi))
-                        intervals.append((0, end))
-                else:
-                    intervals.append((start, end))
-
-        # Recherche optimisée dans les intervalles
-        for start, end in intervals:
-            # Première passe avec peu de points
-            coarse_angles = np.linspace(start, end, 5)
-            coarse_costs = [cost_function(angle) for angle in coarse_angles]
-            best_coarse_idx = np.argmin(coarse_costs)
-
-            # Raffinement autour du meilleur angle grossier
-            if best_coarse_idx > 0 and best_coarse_idx < len(coarse_angles) - 1:
-                fine_start = coarse_angles[best_coarse_idx - 1]
-                fine_end = coarse_angles[best_coarse_idx + 1]
-            else:
-                fine_start = coarse_angles[best_coarse_idx]
-                fine_end = coarse_angles[best_coarse_idx]
-
-            fine_angles = np.linspace(fine_start, fine_end, n_intervals)
-            for angle in fine_angles:
-                cost = cost_function(angle)
-                if cost < min_cost:
-                    min_cost = cost
-                    best_angle = angle
-
-        return best_angle
-
-    def is_transition_point(self, collision_points, t, n):
-        if len(collision_points) < 3:
-            return False
-
-        angles = np.array([np.arctan2(np.dot(vec, n), np.dot(vec, t))
-                           for vec in collision_points])
-        sorted_angles = np.sort(angles) % (2 * np.pi)
-
-        max_gap = np.max(np.diff(sorted_angles))
-        angle_range = np.max(angles) - np.min(angles)
-        point_density = len(angles) / (angle_range + 1e-6)
-
-        return (max_gap > np.pi / 2 or
-                (angle_range > np.pi and point_density < 0.5) or
-                len(collision_points) > 100)
-
-    def analyze_problematic_point(self, point_idx, collision_points, t, n, current_angle):
-        """
-        Debug analysis
-        """
-        print(f"\n=== Detailed Analysis for Point {point_idx} ===")
-
-        # Distribution spatiale
-        vectors_to_collisions = collision_points - self.trajectory.points[point_idx]
-        distances = np.linalg.norm(vectors_to_collisions, axis=1)
-
-        print(f"Spatial Distribution:")
-        print(f"Min distance: {np.min(distances):.2f}")
-        print(f"Max distance: {np.max(distances):.2f}")
-        print(f"Mean distance: {np.mean(distances):.2f}")
-
-        # Distribution angulaire
-        angles = np.array([np.arctan2(np.dot(vec, n), np.dot(vec, t))
-                           for vec in vectors_to_collisions])
-        angles = np.degrees(angles)
-
-        print(f"\nAngular Distribution:")
-        print(f"Angle range: [{np.min(angles):.1f}°, {np.max(angles):.1f}°]")
-        print(f"Current tool angle: {np.degrees(current_angle):.1f}°")
-
-        # Densité des points de collision
-        angle_density = len(angles) / (np.max(angles) - np.min(angles))
-        print(f"Point density: {angle_density:.2f} points/degree")
-
-        # Ajout d'analyse de configuration
-        vectors_to_collisions = collision_points - self.trajectory.points[point_idx]
-        radial_distances = np.dot(vectors_to_collisions, t)
-        axial_distances = np.dot(vectors_to_collisions, n)
-
-        print("\nConfiguration Analysis:")
-        print(f"Radial extent: {np.min(radial_distances):.2f} to {np.max(radial_distances):.2f}")
-        print(f"Axial extent: {np.min(axial_distances):.2f} to {np.max(axial_distances):.2f}")
-        print(
-            f"Radial/Axial ratio: {(np.max(radial_distances) - np.min(radial_distances)) / (np.max(axial_distances) - np.min(axial_distances)):.2f}")
-
-        return {
-            'distances': distances,
-            'angles': angles,
-            'density': angle_density,
-            'radial_extent': (np.min(radial_distances), np.max(radial_distances)),
-            'axial_extent': (np.min(axial_distances), np.max(axial_distances))
-        }
 
 
-    # ----------------------------------------------------------------------------------
-    # 2D projection tilt angle algorithm - not converging for 40% of problematic points
-    # ----------------------------------------------------------------------------------
-
-    #def process_trajectory_for_2D_projection_algorithm(self):
-    #     """Main function"""
-    #     start_time = time.time()
-    #     print("Trajectory processing ...")
-    #
-    #     # Vector acquisition
-    #     t_vec, n_vec, b_vec, tool_vec = self.trajectory.calculate_local_basis()
-    #
-    #     print("\nCollision candidates generation ...")
-    #     # Generate collision candidates for each layer
-    #     for layer_idx in range(len(self.trajectory.layer_indices)):
-    #         layer_points = self.trajectory.get_layer_points(layer_idx)
-    #         self.collision_candidates_generator.generate_collision_candidates_per_layer(
-    #             points=layer_points,
-    #             normal_vectors=n_vec[layer_idx],
-    #             build_vectors=b_vec[layer_idx],
-    #             layer_index=layer_idx,
-    #             is_last_layer=(layer_idx == len(self.trajectory.layer_indices) - 1)
-    #         )
-    #
-    #     generation_time = time.time() - start_time
-    #     print(f"\nGeneration execution time : {generation_time}")
-    #
-    #     # Initial collision detection
-    #     print("\nInitial collision detection ...")
-    #     trajectory_points_colliding = self.check_collisions(tool_vec)
-    #
-    #     # Get problematic points BEFORE starting the resolution
-    #     problematic_points = np.where(trajectory_points_colliding)[0]
-    #     print(f"\nNumber of initial trajectory points colliding: {len(problematic_points)}")
-    #
-    #     if len(problematic_points) == 0:
-    #         print("No collisions to resolve")
-    #         return tool_vec
-    #
-    #     # Iterative collision resolution
-    #     print("\nStarting iterative collision resolution...")
-    #     max_iterations = 1000
-    #     updated_tool_vec = tool_vec.copy()
-    #
-    #     for point_idx in problematic_points:
-    #         #print(f"\nProcessing point {point_idx}")
-    #         point_resolved = False
-    #         iteration_count = 0
-    #
-    #         # Vérifier que le point existe dans collision_points_set
-    #         if point_idx not in self.collision_points_dict:
-    #             #print(f"Warning: No collision data found for point {point_idx}")
-    #             continue
-    #
-    #         initial_angle = np.arctan2(tool_vec[point_idx][1], tool_vec[point_idx][0])
-    #         #print(f"Initial angle: {np.degrees(initial_angle):.2f}°")
-    #
-    #         while not point_resolved and iteration_count < max_iterations:
-    #             #print(f"\nIteration {iteration_count + 1}:")
-    #
-    #             # Calculate new orientation based on colliding points
-    #             new_angle = self.calculate_tilt_angle(
-    #                 point_idx,
-    #                 self.collision_points_dict[point_idx],
-    #                 t_vec[point_idx],
-    #                 n_vec[point_idx],
-    #                 updated_tool_vec[point_idx]
-    #             )
-    #
-    #             if new_angle is not None:
-    #                 #print(f"New angle calculated: {np.degrees(new_angle):.2f}°")
-    #                 #print(f"Angle change: {np.degrees(new_angle - initial_angle):.2f}°")
-    #
-    #                 # Update tool orientation using the new angle
-    #                 updated_tool_vec[point_idx] = (
-    #                         t_vec[point_idx] * np.cos(new_angle) +
-    #                         n_vec[point_idx] * np.sin(new_angle)
-    #                 )
-    #
-    #                 # Check collisions with new orientation
-    #                 cylinder_start = self.tool.get_cylinder_start(
-    #                     self.trajectory.points[point_idx],
-    #                     updated_tool_vec[point_idx]
-    #                 )
-    #
-    #                 distances = self.compute_point_cylinder_distances(
-    #                     self.collision_candidates_dict[point_idx],
-    #                     cylinder_start,
-    #                     updated_tool_vec[point_idx]
-    #                 )
-    #
-    #                 n_collisions = np.sum(distances < self.tool.radius)
-    #                 #print(f"Number of remaining collisions: {n_collisions}")
-    #
-    #                 if not np.any(distances < self.tool.radius):
-    #                     point_resolved = True
-    #                     print(f"Point {point_idx} resolved with final angle {np.degrees(new_angle):.2f}°")
-    #                 else:
-    #                     colliding_indices = np.where(distances < self.tool.radius)[0]
-    #                     self.collision_points_dict[point_idx] = self.collision_candidates_dict[point_idx][
-    #                         colliding_indices]
-    #             else:
-    #                 #print("No valid angle found in this iteration")
-    #                 pass
-    #
-    #             iteration_count += 1
-    #
-    #         if not point_resolved:
-    #             print(f"Warning: Could not resolve collisions for point {point_idx} after {max_iterations} iterations")
-    #
-    #     return updated_tool_vec
-    #
-    # def calculate_tilt_angle_by_2D_projection(self, point_idx, collision_points,
-    #                          t, n, tool_vec):
-    #     current_trajectory_point = self.trajectory.points[point_idx]
-    #
-    #     # Projection on (t, n) plan
-    #     centered_points = collision_points - current_trajectory_point
-    #     t_coords = np.dot(centered_points, t)
-    #     n_coords = np.dot(centered_points, n)
-    #     projected_points = np.column_stack((t_coords, n_coords))
-    #
-    #     # Calculating optimal angle
-    #     R = self.tool.radius
-    #     angles = []
-    #     for point in projected_points:
-    #         d = np.linalg.norm(point)
-    #         if R < d < 2 * R:
-    #             point_angle = np.arctan2(point[1], point[0])
-    #             delta_angle = np.arccos(R / d)
-    #             angles.extend([point_angle + delta_angle, point_angle - delta_angle])
-    #
-    #     if not angles:
-    #         return 0.0
-    #
-    #     best_angle = None
-    #     min_valid_angle = np.inf
-    #     for angle in angles:
-    #         center = R * np.array([np.cos(angle), np.sin(angle)])
-    #         min_distance = np.min(np.linalg.norm(projected_points - center, axis=1))
-    #         if min_distance > R:
-    #             angle_difference = abs(angle - np.arctan2(tool_vec[1], tool_vec[0]))
-    #             angle_difference = min(angle_difference, 2 * np.pi - angle_difference)
-    #             if angle_difference < min_valid_angle:
-    #                 min_valid_angle = angle_difference
-    #                 best_angle = angle
-    #
-    #     return best_angle
 
 

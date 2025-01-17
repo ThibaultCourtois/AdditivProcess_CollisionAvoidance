@@ -1,6 +1,7 @@
 from TrajectoryDataManager import TrajectoryManager
 from CollisionAvoidance import CollisionAvoidance
 from Visualizer import TrajectoryVisualizer
+import numpy as np
 
 # -------------------------------------------------------------------
 # Parameters
@@ -16,9 +17,9 @@ tool_radius = 12.5  # mm
 nozzle_length = 17.0  # mm
 
 # Visualization parameters
-display_layers = [40  , 60]  # Adjust according to the layers to display
+display_layers = [44, 45]  # Adjust according to the layers to display
 revolut_angle = 360
-stride = 3
+stride = 1
 
 # -------------------------------------------------------------------
 # Trajectory processing & collision detection
@@ -53,10 +54,10 @@ initial_visualizer = TrajectoryVisualizer(
     display_layers=display_layers,
     stride=stride,
     ellipse_bool=False,
-    vector_bool=False,
-    show_collision_candidates_bool=True,
+    vector_bool=True,
+    show_collision_candidates_bool=False,
     show_collision_candidates_segments_bool=False,
-    show_problematic_trajectory_points_bool=True,
+    show_problematic_trajectory_points_bool=False,
     collision_points=collision_points
 )
 
