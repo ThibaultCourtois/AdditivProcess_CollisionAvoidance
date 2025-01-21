@@ -470,43 +470,13 @@ class TrajectoryVisualizer:
                         final_collision_points[:, 1],
                         final_collision_points[:, 2],
                         color='red',
-                        s=20,
+                        s=10,
                         marker='x',
                         label='Residual collisions',
                         zorder=10,
                         linewidth=1
                     )
 
-                    # Afficher les bases locales pour chaque point résiduel
-                    for idx in final_point_indices:
-                        point = self.trajectory_data.points[idx]
-                        t_vec = self.t_vectors[idx]
-                        n_vec = self.n_vectors[idx]
-                        b_vec = self.b_vectors[idx]
-
-                        # Mise à l'échelle des vecteurs pour la visualisation
-                        scale = 5.0  # Ajuster cette valeur selon besoin
-
-                        # Tracer les vecteurs de la base locale
-                        self.ax.quiver(point[0], point[1], point[2],
-                                       t_vec[0], t_vec[1], t_vec[2],
-                                       color='blue', alpha=1, length=scale,
-                                       label='t' if idx == final_point_indices[0] else '')
-                        self.ax.quiver(point[0], point[1], point[2],
-                                       n_vec[0], n_vec[1], n_vec[2],
-                                       color='green', alpha=1, length=scale,
-                                       label='n' if idx == final_point_indices[0] else '')
-                        self.ax.quiver(point[0], point[1], point[2],
-                                       b_vec[0], b_vec[1], b_vec[2],
-                                       color='red', alpha=1, length=scale,
-                                       label='b' if idx == final_point_indices[0] else '')
-
-                        # Ajouter également le vecteur outil actuel
-                        tool_vec = self.trajectory_data.tool_directions[idx]
-                        self.ax.quiver(point[0], point[1], point[2],
-                                       tool_vec[0], tool_vec[1], tool_vec[2],
-                                       color='orange', alpha=1, length=scale,
-                                       label='tool' if idx == final_point_indices[0] else '')
         # Set labels and title
         self.ax.set_xlabel('X')
         self.ax.set_ylabel('Y')

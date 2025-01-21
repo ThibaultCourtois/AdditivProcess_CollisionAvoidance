@@ -83,105 +83,28 @@ class Tool:
 # -------------------------------------------------------------------
 
 class CollisionAvoidance:
-    def __init__(self, trajectory_path, bead_width, bead_height, tool_radius, tool_length):
+    def __init__(self, trajectory_path, bead_width, bead_height, tool_radius, tool_length, nb_previous_layers=5):
         # Create trajectory manager instance
         self.trajectory = TrajectoryManager(trajectory_path)
-        self.trajectory.compute_and_store_local_bases()  # Calcul des bases au chargement
+        self.trajectory.compute_and_store_local_bases()
 
-        # Rest of the initialization remains the same
+        # Collision candidates generator
         self.collision_candidates_generator = CollisionCandidatesGenerator()
         self.collision_candidates_generator.initialize_parameters(bead_width, bead_height)
 
         self.tool = Tool(radius=tool_radius, nozzle_length=tool_length)
 
-        self.collision_candidates_dict = {}
+        # Pour stocker les informations de collision
         self.collision_points_dict = {}
-
-        self._initial_collisions_detected = False
+        self.all_candidates_dict = {}  # Nouveau dictionnaire
         self._collision_points = None
 
-    def update_current_collision_candidates_list(self, point_idx, layer):
-        """ Update the list of collision candidates """
-        # If layer change
-        if layer != self.current_layer:
-            # Remove previous top points
-            if self.collision_candidates_generator.top_points is not None:
-                # Find the index of the starting top point of the previous layer
-                layer_start = self.collision_candidates_generator.layer_indices[self.current_layer]
-                # If last layer use trajectory len
-                if self.current_layer + 1 < len(self.collision_candidates_generator.layer_indices):
-                    layer_end = self.collision_candidates_generator.layer_indices[self.current_layer + 1]
-                else:
-                    layer_end = len(self.collision_candidates_generator.left_points)
-
-                num_points = layer_end - layer_start
-                # Remove the top points collision candidates of the previous last layer
-                self.current_collision_candidates_list = self.current_collision_candidates_list[:-num_points]
-
-            self.current_layer = layer
-
-        # Add new left and right points
-        left_point = self.collision_candidates_generator.left_points[point_idx:point_idx + 1]
-        right_point = self.collision_candidates_generator.right_points[point_idx:point_idx + 1]
-
-        new_points = np.vstack([left_point, right_point])
-
-        # Add top points if new last layer
-        if layer == len(self.trajectory.layer_indices) - 1:
-            top_point = self.collision_candidates_generator.top_points[point_idx:point_idx + 1]
-            new_points = np.vstack([new_points, top_point])
-
-        # Updating the current collision candidates list
-        if len(self.current_collision_candidates_list) == 0:
-            self.current_collision_candidates_list = new_points
-        else:
-            self.current_collision_candidates_list = np.vstack([self.current_collision_candidates_list, new_points])
-
-        return self.current_collision_candidates_list
-
-    def check_collisions(self, tool_vec):
-        """" Find initial trajectory points creating a collision between the tool and the collision candidates"""
-        collisions_detected = np.zeros(len(self.trajectory.points), dtype=bool)
-        self.current_collision_candidates_list = np.array([])
-        self.current_layer = 0
-        self.collision_points_dict = {}
-        self.collision_candidates_dict = {}
-
-        for layer_idx in range(len(self.trajectory.layer_indices)):
-            start_idx = self.trajectory.layer_indices[layer_idx]
-            end_idx = self.trajectory.layer_indices[layer_idx + 1] if layer_idx + 1 < len(
-                self.trajectory.layer_indices) else len(self.trajectory.points)
-
-            for i in range(end_idx - start_idx):
-                point_idx = start_idx + i
-                points_to_check = self.update_current_collision_candidates_list(point_idx, layer_idx)
-
-                if len(points_to_check) > 0:
-                    cylinder_start = self.tool.get_cylinder_start(
-                        self.trajectory.points[point_idx],
-                        tool_vec[point_idx]
-                    )
-                    distances = self.compute_point_cylinder_distances(
-                        points_to_check,
-                        cylinder_start,
-                        tool_vec[point_idx]
-                    )
-                    is_collision = np.any(distances < self.tool.radius)
-                    collisions_detected[point_idx] = is_collision
-
-                    if is_collision:
-                        self.collision_candidates_dict[point_idx] = points_to_check.copy()
-                        collision_indices = np.where(distances < self.tool.radius)[0]
-                        self.collision_points_dict[point_idx] = points_to_check[collision_indices]
-
-        return collisions_detected
-
-    def detect_initial_collisions(self):
-        """Launch initial detection collision"""
-        if self._initial_collisions_detected:
+    def detect_collisions(self):
+        """Détecte toutes les collisions sur la trajectoire avec la méthode exhaustive et filtrage en Z"""
+        if self._collision_points is not None:
             return self._collision_points
 
-        # Utiliser directement les bases pré-calculées
+        # Génération des points candidats pour toutes les couches
         for layer_idx in range(len(self.trajectory.layer_indices)):
             layer_points = self.trajectory.get_layer_points(layer_idx)
             self.collision_candidates_generator.generate_collision_candidates_per_layer(
@@ -192,39 +115,74 @@ class CollisionAvoidance:
                 is_last_layer=(layer_idx == len(self.trajectory.layer_indices) - 1)
             )
 
-        self._collision_points = self.check_collisions(self.trajectory.tool_vectors)
-        self._initial_collisions_detected = True
+        # Compteurs pour statistiques
+        total_candidates = 0
+        filtered_candidates = 0
 
-        return self._collision_points
+        # Détection des collisions avec la méthode exhaustive
+        collision_points = np.zeros(len(self.trajectory.points), dtype=bool)
+        self.collision_points_dict = {}  # Pour stocker les points en collision
+        self.all_candidates_dict = {}  # Nouveau dictionnaire pour tous les points candidats
 
-    def verify_collisions(self, updated_tool_vectors=None):
-        """Vérifie les collisions sur l'ensemble de la trajectoire avec les vecteurs outils actuels"""
-        collision_count = 0
-        residual_collisions = []
+        for point_idx, current_point in enumerate(self.trajectory.points):
+            current_layer = np.searchsorted(self.trajectory.layer_indices[1:], point_idx)
+            collision_candidates = []
 
-        # Si pas de vecteurs fournis, utiliser ceux de la trajectoire
-        tool_vectors = updated_tool_vectors if updated_tool_vectors is not None else self.trajectory.tool_vectors
+            # Récupérer tous les points déjà construits
+            for layer in range(current_layer + 1):
+                start_idx = self.trajectory.layer_indices[layer]
+                end_idx = (self.trajectory.layer_indices[layer + 1]
+                           if layer + 1 < len(self.trajectory.layer_indices)
+                           else len(self.trajectory.points))
 
-        # Check initial collisions
-        initial_collision_points = np.where(self._collision_points)[0]
+                if layer == current_layer:
+                    end_idx = min(end_idx, point_idx)
 
-        for point_idx in initial_collision_points:
-            if point_idx in self.collision_candidates_dict:
-                # Recalculer la distance avec le vecteur outil actuel
+                # Points left et right avec filtrage en Z
+                left_points = self.collision_candidates_generator.left_points[start_idx:end_idx]
+                right_points = self.collision_candidates_generator.right_points[start_idx:end_idx]
+
+                total_candidates += len(left_points) + len(right_points)
+
+                # Application du filtrage en Z
+                depth_mask_left = (current_point[2] - left_points[:, 2]) <= self.tool.radius
+                depth_mask_right = (current_point[2] - right_points[:, 2]) <= self.tool.radius
+
+                filtered_candidates += np.sum(~depth_mask_left) + np.sum(~depth_mask_right)
+
+                if np.any(depth_mask_left):
+                    collision_candidates.append(left_points[depth_mask_left])
+                if np.any(depth_mask_right):
+                    collision_candidates.append(right_points[depth_mask_right])
+
+                # Points top pour la dernière couche
+                if layer == len(self.trajectory.layer_indices) - 1 and \
+                        self.collision_candidates_generator.top_points is not None:
+                    top_points = self.collision_candidates_generator.top_points[start_idx:end_idx]
+                    total_candidates += len(top_points)
+                    depth_mask_top = (current_point[2] - top_points[:, 2]) <= self.tool.radius
+                    filtered_candidates += np.sum(~depth_mask_top)
+                    if np.any(depth_mask_top):
+                        collision_candidates.append(top_points[depth_mask_top])
+
+            if collision_candidates:
+                all_candidates = np.vstack(collision_candidates)
+                # Vérifier les collisions avec le cylindre de l'outil
                 distances = self.compute_point_cylinder_distances(
-                    self.collision_candidates_dict[point_idx],
-                    self.tool.get_cylinder_start(
-                        self.trajectory.points[point_idx],
-                        tool_vectors[point_idx]
-                    ),
-                    tool_vectors[point_idx]
+                    all_candidates,
+                    self.tool.get_cylinder_start(current_point, self.trajectory.tool_vectors[point_idx]),
+                    self.trajectory.tool_vectors[point_idx]
                 )
-
                 if np.any(distances < self.tool.radius):
-                    collision_count += 1
-                    residual_collisions.append(point_idx)
+                    collision_points[point_idx] = True
+                    self.collision_points_dict[point_idx] = all_candidates[distances < self.tool.radius]
+                    self.all_candidates_dict[point_idx] = all_candidates
 
-        return collision_count, residual_collisions
+        print(f"Total points candidats : {total_candidates}")
+        print(f"Points filtrés : {filtered_candidates} ({filtered_candidates / total_candidates * 100:.1f}%)")
+
+        self._collision_points = collision_points
+        return collision_points
 
     @staticmethod
     def compute_point_cylinder_distances(points, cylinder_start, cylinder_axis):
@@ -257,7 +215,7 @@ class CollisionAvoidance:
         updated_tool_vec = tool_vec.copy()
 
         # Détection des collisions initiales
-        trajectory_points_colliding = self.detect_initial_collisions()
+        trajectory_points_colliding = self.detect_collisions()
 
         # Points problématiques
         problematic_points = np.where(trajectory_points_colliding)[0]
@@ -291,7 +249,6 @@ class CollisionAvoidance:
             new_angle = self.calculate_tilt_angle(
                 point_idx,
                 self.collision_points_dict[point_idx],
-                self.collision_candidates_dict[point_idx],
                 t_vec[point_idx],
                 n_vec[point_idx],
                 b_vec[point_idx],
@@ -307,7 +264,7 @@ class CollisionAvoidance:
 
                 # Vérification de la résolution
                 distances = self.compute_point_cylinder_distances(
-                    self.collision_candidates_dict[point_idx],
+                    self.all_candidates_dict[point_idx],
                     self.tool.get_cylinder_start(
                         self.trajectory.points[point_idx],
                         updated_tool_vec[point_idx]
@@ -348,22 +305,46 @@ class CollisionAvoidance:
 
         return updated_tool_vec
 
+    def verify_collisions(self, updated_tool_vectors=None):
+        """Vérifie les collisions résiduelles après modification des vecteurs outils"""
+        tool_vectors = updated_tool_vectors if updated_tool_vectors is not None else self.trajectory.tool_vectors
+        collision_count = 0
+        residual_collisions = []
+
+        # Vérifier uniquement les points précédemment en collision
+        initial_collision_points = np.where(self._collision_points)[0]
+
+        for point_idx in initial_collision_points:
+            if point_idx in self.collision_points_dict:
+                distances = self.compute_point_cylinder_distances(
+                    self.collision_points_dict[point_idx],
+                    self.tool.get_cylinder_start(
+                        self.trajectory.points[point_idx],
+                        tool_vectors[point_idx]
+                    ),
+                    tool_vectors[point_idx]
+                )
+                if np.any(distances < self.tool.radius):
+                    collision_count += 1
+                    residual_collisions.append(point_idx)
+
+        return collision_count, residual_collisions
+
     # ----------------------------------------------------------------------------------
     # Algorithm for tool_angle modification using auxiliary functions
     # ----------------------------------------------------------------------------------
 
-    def calculate_tilt_angle(self, point_idx, collision_points, all_candidate_points, t, n, b, tool_vec):
+    def calculate_tilt_angle(self, point_idx, collision_points, t, n, b, tool_vec):
         """
-        Calcule l'angle de tilt minimal pour éviter les collisions en projetant les points dans le plan (n,b)
-        de manière itérative en minimisant le nombre de collisions.
+        Calcule l'angle de tilt minimal pour éviter les collisions.
         """
         current_point = self.trajectory.points[point_idx]
-        max_iterations = 10
+        all_candidate_points = self.all_candidates_dict[point_idx]  # Utilisation des points pré-calculés
 
-        # Angles de test non linéaires
+        max_iterations = 10
         angles = np.concatenate([
-            np.linspace(0.1, np.pi / 6, 15),  # 15 points entre 0.1 et 30°
-            np.linspace(np.pi / 6, np.pi / 2, 10)  # 10 points entre 30° et 90°
+            np.linspace(0.1, np.pi / 6, 15),
+            np.linspace(np.pi / 6, np.pi / 2, 10)
         ])
 
         # Point de départ : vecteur outil actuel
@@ -438,7 +419,6 @@ class CollisionAvoidance:
                 break
 
             current_angle = best_angle_this_iter
-
         return None
 
 
