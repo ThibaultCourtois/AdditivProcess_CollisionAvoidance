@@ -115,10 +115,6 @@ class CollisionAvoidance:
                 is_last_layer=(layer_idx == len(self.trajectory.layer_indices) - 1)
             )
 
-        # Compteurs pour statistiques
-        total_candidates = 0
-        filtered_candidates = 0
-
         # Détection des collisions avec la méthode exhaustive
         collision_points = np.zeros(len(self.trajectory.points), dtype=bool)
         self.collision_points_dict = {}  # Pour stocker les points en collision
@@ -142,13 +138,9 @@ class CollisionAvoidance:
                 left_points = self.collision_candidates_generator.left_points[start_idx:end_idx]
                 right_points = self.collision_candidates_generator.right_points[start_idx:end_idx]
 
-                total_candidates += len(left_points) + len(right_points)
-
                 # Application du filtrage en Z
                 depth_mask_left = (current_point[2] - left_points[:, 2]) <= self.tool.radius
                 depth_mask_right = (current_point[2] - right_points[:, 2]) <= self.tool.radius
-
-                filtered_candidates += np.sum(~depth_mask_left) + np.sum(~depth_mask_right)
 
                 if np.any(depth_mask_left):
                     collision_candidates.append(left_points[depth_mask_left])
@@ -159,12 +151,9 @@ class CollisionAvoidance:
                 if layer == len(self.trajectory.layer_indices) - 1 and \
                         self.collision_candidates_generator.top_points is not None:
                     top_points = self.collision_candidates_generator.top_points[start_idx:end_idx]
-                    total_candidates += len(top_points)
                     depth_mask_top = (current_point[2] - top_points[:, 2]) <= self.tool.radius
-                    filtered_candidates += np.sum(~depth_mask_top)
                     if np.any(depth_mask_top):
                         collision_candidates.append(top_points[depth_mask_top])
-
             if collision_candidates:
                 all_candidates = np.vstack(collision_candidates)
                 # Vérifier les collisions avec le cylindre de l'outil
@@ -177,10 +166,6 @@ class CollisionAvoidance:
                     collision_points[point_idx] = True
                     self.collision_points_dict[point_idx] = all_candidates[distances < self.tool.radius]
                     self.all_candidates_dict[point_idx] = all_candidates
-
-        print(f"Total points candidats : {total_candidates}")
-        print(f"Points filtrés : {filtered_candidates} ({filtered_candidates / total_candidates * 100:.1f}%)")
-
         self._collision_points = collision_points
         return collision_points
 
@@ -336,90 +321,86 @@ class CollisionAvoidance:
 
     def calculate_tilt_angle(self, point_idx, collision_points, t, n, b, tool_vec):
         """
-        Calcule l'angle de tilt minimal pour éviter les collisions.
+        Calcule l'angle de tilt optimal en deux phases:
+        1. Recherche grossière pour trouver une première solution
+        2. Optimisation fine en revenant vers l'angle initial
         """
         current_point = self.trajectory.points[point_idx]
-        all_candidate_points = self.all_candidates_dict[point_idx]  # Utilisation des points pré-calculés
-
-        max_iterations = 10
-        angles = np.concatenate([
-            np.linspace(0.1, np.pi / 6, 15),
-            np.linspace(np.pi / 6, np.pi / 2, 10)
-        ])
+        all_candidate_points = self.all_candidates_dict[point_idx]
 
         # Point de départ : vecteur outil actuel
-        best_tool_vec = tool_vec
         current_angle = np.arctan2(np.dot(tool_vec, b), np.dot(tool_vec, n))
-        min_collisions = len(all_candidate_points)  # Pire cas initial
 
-        for iteration in range(max_iterations):
-            if iteration == 0:
-                print(f"    Initial attempt...")
-            else:
-                print(f"    Iteration {iteration} (with {min_collisions} collisions)...")
+        # Analyse du quadrant prioritaire
+        centered_points = collision_points - current_point
+        n_coords = np.dot(centered_points, n)
+        b_coords = np.dot(centered_points, b)
+        projected_points = np.column_stack((n_coords, b_coords))
 
-            # Analyse de la distribution des points dans les quadrants
-            centered_points = collision_points - current_point
-            n_coords = np.dot(centered_points, n)
-            b_coords = np.dot(centered_points, b)
-            projected_points = np.column_stack((n_coords, b_coords))
+        quad1_count = 0  # Quadrant sens horaire
+        quad2_count = 0  # Quadrant sens anti-horaire
 
-            quad1_count = 0  # Quadrant sens horaire
-            quad2_count = 0  # Quadrant sens anti-horaire
+        for point in projected_points:
+            point_angle = np.arctan2(point[1], point[0])
+            angle_diff = point_angle - current_angle
+            while angle_diff > np.pi:
+                angle_diff -= 2 * np.pi
+            while angle_diff < -np.pi:
+                angle_diff += 2 * np.pi
 
-            for point in projected_points:
-                point_angle = np.arctan2(point[1], point[0])
-                angle_diff = point_angle - current_angle
+            if 0 < angle_diff < np.pi / 2:
+                quad1_count += 1
+            elif -np.pi / 2 < angle_diff < 0:
+                quad2_count += 1
 
-                # Normaliser entre -π et π
-                while angle_diff > np.pi:
-                    angle_diff -= 2 * np.pi
-                while angle_diff < -np.pi:
-                    angle_diff += 2 * np.pi
+        direction = 1 if quad2_count > quad1_count else -1
 
-                if 0 < angle_diff < np.pi / 2:
-                    quad1_count += 1
-                elif -np.pi / 2 < angle_diff < 0:
-                    quad2_count += 1
+        # Phase 1: Recherche grossière
+        coarse_angles = np.array([1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 75, 90])
+        coarse_angles = np.radians(coarse_angles)
+        first_solution = None
 
-            # Direction préférentielle
-            preferred_direction = 1 if quad2_count > quad1_count else -1
+        for angle in coarse_angles:
+            test_angle = current_angle + direction * angle
+            test_tool_vec = n * np.cos(test_angle) + b * np.sin(test_angle)
 
-            # Test des deux quadrants
-            found_solution = False
-            best_angle_this_iter = current_angle
+            distances = self.compute_point_cylinder_distances(
+                all_candidate_points,
+                self.tool.get_cylinder_start(current_point, test_tool_vec),
+                test_tool_vec
+            )
 
-            for direction in [preferred_direction, -preferred_direction]:
-                for test_angle_offset in angles:
-                    test_angle = current_angle + direction * test_angle_offset
-                    test_tool_vec = n * np.cos(test_angle) + b * np.sin(test_angle)
-
-                    # Vérifier les collisions
-                    distances = self.compute_point_cylinder_distances(
-                        all_candidate_points,
-                        self.tool.get_cylinder_start(current_point, test_tool_vec),
-                        test_tool_vec
-                    )
-
-                    num_collisions = np.sum(distances < self.tool.radius)
-
-                    # Si solution sans collision trouvée
-                    if num_collisions == 0:
-                        return test_angle
-
-                    # Sinon, garder le meilleur cas
-                    if num_collisions < min_collisions:
-                        min_collisions = num_collisions
-                        best_angle_this_iter = test_angle
-                        best_tool_vec = test_tool_vec
-
-            # Mise à jour pour la prochaine itération
-            if best_angle_this_iter == current_angle:
-                # Aucune amélioration trouvée
+            if np.all(distances >= self.tool.radius):
+                first_solution = test_angle
                 break
 
-            current_angle = best_angle_this_iter
-        return None
+        if first_solution is None:
+            return None
+
+        # Phase 2: Optimisation fine
+        fine_step = np.radians(0.1)  # Pas de 0.1°
+        current_test_angle = first_solution
+        best_valid_angle = first_solution
+
+        while True:
+            # Test d'un angle légèrement plus petit
+            test_angle = current_test_angle - direction * fine_step
+            test_tool_vec = n * np.cos(test_angle) + b * np.sin(test_angle)
+
+            distances = self.compute_point_cylinder_distances(
+                all_candidate_points,
+                self.tool.get_cylinder_start(current_point, test_tool_vec),
+                test_tool_vec
+            )
+
+            if np.all(distances >= self.tool.radius):
+                best_valid_angle = test_angle
+                current_test_angle = test_angle
+            else:
+                # Si on trouve une collision, on s'arrête et on garde le dernier angle valide
+                break
+
+        return best_valid_angle
 
 
 
