@@ -333,31 +333,21 @@ class CollisionAvoidance:
 
         # Analyse du quadrant prioritaire
         centered_points = collision_points - current_point
-        n_coords = np.dot(centered_points, n)
-        b_coords = np.dot(centered_points, b)
-        projected_points = np.column_stack((n_coords, b_coords))
+        projected_points = np.column_stack((
+            np.dot(centered_points, n),
+            np.dot(centered_points, b)
+        ))
 
-        quad1_count = 0  # Quadrant sens horaire
-        quad2_count = 0  # Quadrant sens anti-horaire
-
-        for point in projected_points:
-            point_angle = np.arctan2(point[1], point[0])
-            angle_diff = point_angle - current_angle
-            while angle_diff > np.pi:
-                angle_diff -= 2 * np.pi
-            while angle_diff < -np.pi:
-                angle_diff += 2 * np.pi
-
-            if 0 < angle_diff < np.pi / 2:
-                quad1_count += 1
-            elif -np.pi / 2 < angle_diff < 0:
-                quad2_count += 1
+        # Comptage des points par quadrant
+        angle_diffs = np.arctan2(projected_points[:, 1], projected_points[:, 0]) - current_angle
+        angle_diffs = (angle_diffs + np.pi) % (2 * np.pi) - np.pi  # Normalisation [-pi, pi]
+        quad1_count = np.sum((0 < angle_diffs) & (angle_diffs < np.pi / 2))
+        quad2_count = np.sum((-np.pi / 2 < angle_diffs) & (angle_diffs < 0))
 
         direction = 1 if quad2_count > quad1_count else -1
 
-        # Phase 1: Recherche grossière
-        coarse_angles = np.array([1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 75, 90])
-        coarse_angles = np.radians(coarse_angles)
+        # Phase 1: Recherche grossière (recherche dichotomique)
+        coarse_angles = np.radians([1, 15, 30, 45, 60, 90])
         first_solution = None
 
         for angle in coarse_angles:
@@ -377,13 +367,12 @@ class CollisionAvoidance:
         if first_solution is None:
             return None
 
-        # Phase 2: Optimisation fine
-        fine_step = np.radians(0.1)  # Pas de 0.1°
+        # Phase 2: Optimisation fine (adaptative)
+        fine_step = np.radians(1.0)  # Pas initial plus large
         current_test_angle = first_solution
         best_valid_angle = first_solution
 
-        while True:
-            # Test d'un angle légèrement plus petit
+        while fine_step > np.radians(0.1):  # Réduction progressive du pas
             test_angle = current_test_angle - direction * fine_step
             test_tool_vec = n * np.cos(test_angle) + b * np.sin(test_angle)
 
@@ -397,8 +386,7 @@ class CollisionAvoidance:
                 best_valid_angle = test_angle
                 current_test_angle = test_angle
             else:
-                # Si on trouve une collision, on s'arrête et on garde le dernier angle valide
-                break
+                fine_step /= 2  # Réduire le pas si une collision est trouvée
 
         return best_valid_angle
 
