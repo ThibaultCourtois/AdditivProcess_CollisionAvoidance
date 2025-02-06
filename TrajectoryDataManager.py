@@ -38,7 +38,6 @@ class TrajectoryManager:
 
         # Fix sharp turns after initial basis calculation
         self.fix_extremities_vector()
-        self.fix_symmetry_transitions()
 
     def load_trajectory(self, file_path):
         """Load and process trajectory data from file"""
@@ -57,7 +56,12 @@ class TrajectoryManager:
     def identify_layers(self):
         """Identifying starting index of each layer"""
         extrusion_col = self.trajectory_data['Extrusion'].values
-        layer_starts_indices = np.where(extrusion_col == 0)[0] + 1
+        layer_starts_indices = np.where(extrusion_col == 0)[0]
+
+        # Ajouter 0 comme premier index si nécessaire
+        if len(layer_starts_indices) == 0 or layer_starts_indices[0] != 0:
+            layer_starts_indices = np.insert(layer_starts_indices, 0, 0)
+
         return layer_starts_indices
 
     def get_layer_points(self, layer_index):
@@ -72,79 +76,41 @@ class TrajectoryManager:
         end_idx = self.layer_indices[layer_index + 1] if layer_index + 1 < len(self.layer_indices) else len(self.points)
         return self.build_directions[start_idx:end_idx]
 
-    def detect_extremities(self):
-        """Détecte les points avec des sauts importants en distance et direction"""
-        # Calculer les différences de position
-        point_diffs = np.diff(self.points, axis=0)
-        distances = np.linalg.norm(point_diffs, axis=1)
+    def detect_jumps_from_extrusion(self):
+        """Détecte les points de saut en utilisant l'information d'extrusion"""
+        # Les points de saut sont là où l'extrusion change
+        extrusion_changes = np.diff(self.extrusion)
+        jump_indices = np.where(extrusion_changes != 0)[0]
 
-        # Calculer la distance moyenne et son écart-type
-        mean_dist = np.mean(distances)
-        std_dist = np.std(distances)
+        # Créer un masque pour les points concernés
+        jump_mask = np.zeros(len(self.points), dtype=bool)
 
-        # Seuil de distance plus adapté basé sur la statistique des distances
-        dist_threshold = mean_dist + 3 * std_dist  # règle des 3-sigma
+        # Marquer les points avant et après chaque changement d'extrusion
+        for idx in jump_indices:
+            jump_mask[idx] = True
+            jump_mask[idx + 1] = True
 
-        # Calculer les angles entre vecteurs consécutifs quand ils existent
-        directions = np.zeros_like(point_diffs)
-        mask = distances > 1e-10
-        directions[mask] = point_diffs[mask] / distances[mask, np.newaxis]
-        dot_products = np.sum(directions[:-1] * directions[1:], axis=1)
-        angles = np.arccos(np.clip(dot_products, -1.0, 1.0))
-
-        # Créer le masque initial sur les distances
-        sharp_turn_mask = np.zeros(len(self.points), dtype=bool)
-
-        # Identifier les points avec des grandes distances
-        large_dist_indices = np.where(distances > dist_threshold)[0]
-
-        # Pour chaque point avec une grande distance, vérifier si c'est aussi
-        # un point avec un changement significatif de direction
-        for idx in large_dist_indices:
-            if idx > 0 and idx < len(angles):  # Vérifier qu'on peut calculer l'angle
-                if angles[idx - 1] > np.pi / 4:  # 45 degrés de changement minimum
-                    sharp_turn_mask[idx] = True
-                    sharp_turn_mask[idx + 1] = True  # Marquer aussi le point suivant
-
-        return sharp_turn_mask
-
-    def detect_symmetry_transitions(self):
-        """Détecte les transitions aux plans de symétrie"""
-        dot_products = np.sum(self.t_vectors[1:] * self.t_vectors[:-1], axis=1)
-        angles = np.arccos(np.clip(dot_products, -1.0, 1.0))
-
-        # Combiner critère d'angle avec position
-        symmetry_mask = np.zeros(len(self.points), dtype=bool)
-        potential_transitions = np.where(angles > np.pi / 4)[0] + 1
-
-        for idx in potential_transitions:
-            # Vérifier proximité avec plan de symétrie
-            x, y = self.points[idx, 0:2]
-            r = np.sqrt(x * x + y * y)
-            theta = np.arctan2(y, x)
-            sym_angles = np.array([0, np.pi / 2, np.pi, 3 * np.pi / 2])
-            angle_diffs = np.min(np.abs(np.mod(theta - sym_angles + np.pi, 2 * np.pi) - np.pi))
-            if angle_diffs < np.radians(10):
-                symmetry_mask[idx] = True
-
-        return symmetry_mask
+        return jump_mask
 
     def fix_extremities_vector(self):
-        """Corrige les vecteurs aux points de saut selon leur position (avant/après le saut)"""
-        sharp_turns = self.detect_extremities()
-        indices = np.where(sharp_turns)[0]
+        """Corrige les vecteurs aux points de saut en utilisant l'information d'extrusion"""
+        jump_mask = self.detect_jumps_from_extrusion()
+        indices = np.where(jump_mask)[0]
 
         for i in range(0, len(indices) - 1, 2):
             start_idx = indices[i]
             end_idx = indices[i + 1]
 
-            # Pour le point de départ: utiliser le vecteur tangent du point précédent
-            if start_idx > 0:  # Vérifier qu'on n'est pas au tout premier point
-                self.t_vectors[start_idx] = self.t_vectors[start_idx - 1]
-
-            # Pour le point d'arrivée: utiliser le vecteur tangent du point suivant
-            if end_idx < len(self.points) - 1:  # Vérifier qu'on n'est pas au dernier point
-                self.t_vectors[end_idx] = self.t_vectors[end_idx + 1]
+            # Si l'extrusion s'arrête, utiliser le vecteur suivant
+            if self.extrusion[start_idx] == 1 and self.extrusion[start_idx + 1] == 0:
+                if end_idx + 1 < len(self.points):
+                    self.t_vectors[start_idx] = self.t_vectors[end_idx + 1]
+                    self.t_vectors[end_idx] = self.t_vectors[end_idx + 1]
+            # Si l'extrusion démarre, utiliser le vecteur précédent
+            else:
+                if start_idx > 0:
+                    self.t_vectors[start_idx] = self.t_vectors[start_idx - 1]
+                    self.t_vectors[end_idx] = self.t_vectors[start_idx - 1]
 
             # Mise à jour des normales pour les deux points
             for idx in [start_idx, end_idx]:
@@ -153,31 +119,8 @@ class TrajectoryManager:
                 if norm > 1e-10:
                     self.n_vectors[idx] /= norm
 
-    def fix_symmetry_transitions(self):
-        symmetry_mask = self.detect_symmetry_transitions()
-        for i in range(1, len(self.points) - 1):
-            if symmetry_mask[i]:
-                t_prev = self.t_vectors[i - 1]
-                t_next = self.t_vectors[i + 1]
-                t_new = 0.5 * (t_prev - t_next)
-                norm_t = np.linalg.norm(t_new)
-
-                if norm_t > 1e-10:
-                    t_new = t_new / norm_t
-                else:
-                    t_new = self.t_vectors[i - 1]
-
-                self.t_vectors[i] = t_new
-                n_new = np.cross(t_new, self.b_vectors[i])
-                norm_n = np.linalg.norm(n_new)
-
-                if norm_n > 1e-10:
-                    self.n_vectors[i] = n_new / norm_n
-                else:
-                    self.n_vectors[i] = self.n_vectors[i - 1]
-
     def calculate_local_basis(self):
-        """Vectorized local basis calculus"""
+        """Vectorized local basis calculus without Z filtering"""
         # Initialiser les vecteurs
         tangents = np.zeros_like(self.points)
         normalized_t = np.zeros_like(self.points)
@@ -185,13 +128,8 @@ class TrajectoryManager:
         # Calculer toutes les différences
         diffs = np.diff(self.points, axis=0)
 
-        # Détecter les grands sauts en Z (transitions de couche)
-        z_diffs = np.abs(diffs[:, 2])  # Composante Z des différences
-        z_threshold = 1.0  # À ajuster selon votre géométrie
-        valid_diffs = z_diffs < z_threshold
-
-        # Assigner les tangentes seulement où les sauts en Z sont petits
-        tangents[:-1][valid_diffs] = diffs[valid_diffs]
+        # Assigner les tangentes pour tous les points
+        tangents[:-1] = diffs
         tangents[-1] = tangents[-2]  # Dernier point
 
         # Normalization
@@ -235,6 +173,31 @@ class TrajectoryManager:
         # Save as CSV
         modified_trajectory.to_csv(output_path, index=False)
         print(f"Modified trajectory saved to: {output_path}")
+
+    def compute_average_build_vectors(self):
+        """Calcule les vecteurs build moyens par couche"""
+        avg_build_vectors = []
+
+        for i in range(len(self.layer_indices)):
+            start_idx = self.layer_indices[i]
+            end_idx = (self.layer_indices[i + 1]
+                       if i + 1 < len(self.layer_indices)
+                       else len(self.points))
+
+            # Extraire les vecteurs build de la couche
+            layer_build_vectors = self.b_vectors[start_idx:end_idx]
+
+            # Calculer la moyenne
+            avg_vector = np.mean(layer_build_vectors, axis=0)
+
+            # Normaliser
+            norm = np.linalg.norm(avg_vector)
+            if norm > 1e-10:
+                avg_vector /= norm
+
+            avg_build_vectors.append(avg_vector)
+
+        return np.array(avg_build_vectors)
 
     @staticmethod
     def format_trajectory_data(points: np.ndarray, tool_vectors: np.ndarray,

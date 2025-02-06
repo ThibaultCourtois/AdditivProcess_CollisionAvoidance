@@ -1,7 +1,7 @@
+import numpy as np
 from TrajectoryDataManager import TrajectoryManager
 from CollisionAvoidance import CollisionAvoidance
-from Visualizer import TrajectoryVisualizer
-import numpy as np
+from Visualizer import AdvancedTrajectoryVisualizer
 
 # -------------------------------------------------------------------
 # Parameters
@@ -14,10 +14,13 @@ OUTPUT_FILE = "Trajectoire_Schwarz_Optimized.csv"
 bead_width = 3.0  # mm
 bead_height = 1.95  # mm
 tool_radius = 12.5  # mm
+tool_length = 1000
 nozzle_length = 17.0  # mm
+n_bead_points = 16
+n_tool_points = 16
 
 # Visualization parameters
-display_layers = [40, 60]  # Adjust according to the layers to display
+display_layers = [55, 60]  # Adjust according to the layers to display
 revolut_angle = 360
 stride = 1
 
@@ -34,11 +37,33 @@ collision_manager = CollisionAvoidance(
     bead_width=bead_width,
     bead_height=bead_height,
     tool_radius=tool_radius,
-    tool_length=nozzle_length
+    tool_length=nozzle_length,
 )
 
-# Detect initial collisions once
-collision_points = collision_manager.detect_collisions()
+# Génération des points candidats pour toutes les couches
+print("Generating collision candidates...")
+for layer_idx in range(len(trajectory_manager.layer_indices)):
+    start_idx = trajectory_manager.layer_indices[layer_idx]
+    end_idx = (trajectory_manager.layer_indices[layer_idx + 1]
+               if layer_idx + 1 < len(trajectory_manager.layer_indices)
+               else len(trajectory_manager.points))
+
+    layer_points = trajectory_manager.points[start_idx:end_idx]
+    layer_normals = trajectory_manager.n_vectors[start_idx:end_idx]
+    layer_builds = trajectory_manager.b_vectors[start_idx:end_idx]
+
+    collision_manager.collision_candidates_generator.generate_collision_candidates_per_layer(
+        points=layer_points,
+        normal_vectors=layer_normals,
+        build_vectors=layer_builds,
+        layer_index=layer_idx,
+        is_last_layer  = layer_idx == len(trajectory_manager.layer_indices) - 1,
+    )
+
+print("Detecting initial collisions...")
+collision_points = collision_manager.detect_collisions_optimized()
+#collision_points = collision_manager.detect_collisions_exhaustive()
+
 
 # -------------------------------------------------------------------
 # Initial trajectory visualization
@@ -46,33 +71,51 @@ collision_points = collision_manager.detect_collisions()
 
 print("\n=== Visualizing Initial Trajectory ===")
 
-# Create visualizer for initial trajectory
-initial_visualizer = TrajectoryVisualizer(
+# Create and configure visualizer for initial trajectory
+initial_visualizer = AdvancedTrajectoryVisualizer(
     trajectory_manager=trajectory_manager,
     collision_manager=collision_manager,
-    revolut_angle_display=revolut_angle,
     display_layers=display_layers,
-    stride=stride,
-    ellipse_bool=False,
-    vector_bool=False,
-    show_collision_candidates_bool=False,
-    show_collision_candidates_segments_bool=False,
-    show_problematic_trajectory_points_bool=True,
-    collision_points=collision_points
+    revolut_angle=revolut_angle,
+    stride=stride
 )
 
-initial_visualizer.visualize()
+# Configure geometry parameters
+initial_visualizer.geometry_visualizer.set_parameters(
+    bead_width=bead_width,
+    bead_height=bead_height,
+    tool_radius=tool_radius,
+    tool_length=tool_length,
+    nozzle_length=nozzle_length,
+    n_bead_points=n_bead_points,
+    n_tool_points=n_tool_points
+)
+
+# Setup visualization options
+initial_visualizer.setup_visualization(
+    show_beads=False,
+    low_res_bead=True,
+    show_vectors=True,
+    show_tool=False,
+    show_collisions=True,
+    show_collision_candidates=False,
+    show_collision_bases=False
+)
+
+initial_visualizer.create_figure()
+initial_visualizer.apply_layer_filter(
+    layers=display_layers,
+    angle_limit=revolut_angle
+)
+initial_visualizer.visualize_trajectory()
+initial_visualizer.show()
 
 # -------------------------------------------------------------------
 # Trajectory optimization
 # -------------------------------------------------------------------
 
 print("\n=== Processing Trajectory Optimization ===")
-
-# Process trajectory using existing collision detection
 new_tool_vectors = collision_manager.process_trajectory()
-
-# Save optimized trajectory
 trajectory_manager.save_modified_trajectory(new_tool_vectors, OUTPUT_FILE)
 
 # -------------------------------------------------------------------
@@ -81,10 +124,8 @@ trajectory_manager.save_modified_trajectory(new_tool_vectors, OUTPUT_FILE)
 
 print("\n=== Visualizing Optimized Trajectory ===")
 
-# Create new trajectory manager for optimized trajectory
+# Create new managers for optimized trajectory
 optimized_trajectory = TrajectoryManager(OUTPUT_FILE)
-
-# Create new collision manager and detect collisions for verification
 optimized_collision_manager = CollisionAvoidance(
     trajectory_path=OUTPUT_FILE,
     bead_width=bead_width,
@@ -93,21 +134,62 @@ optimized_collision_manager = CollisionAvoidance(
     tool_length=nozzle_length
 )
 
-optimized_collision_points = optimized_collision_manager.detect_collisions()
+# Génération des points candidats pour la trajectoire optimisée
+print("Generating collision candidates for optimized trajectory...")
+for layer_idx in range(len(optimized_trajectory.layer_indices)):
+    start_idx = optimized_trajectory.layer_indices[layer_idx]
+    end_idx = (optimized_trajectory.layer_indices[layer_idx + 1]
+               if layer_idx + 1 < len(optimized_trajectory.layer_indices)
+               else len(optimized_trajectory.points))
 
-# Create visualizer for optimized trajectory
-optimized_visualizer = TrajectoryVisualizer(
+    layer_points = optimized_trajectory.points[start_idx:end_idx]
+    layer_normals = optimized_trajectory.n_vectors[start_idx:end_idx]
+    layer_builds = optimized_trajectory.b_vectors[start_idx:end_idx]
+
+    optimized_collision_manager.collision_candidates_generator.generate_collision_candidates_per_layer(
+        points=layer_points,
+        normal_vectors=layer_normals,
+        build_vectors=layer_builds,
+        layer_index=layer_idx,
+        is_last_layer=layer_idx == len(trajectory_manager.layer_indices) - 1
+    )
+
+optimized_collision_points = optimized_collision_manager.detect_collisions_optimized()
+
+# Create and configure visualizer for optimized trajectory
+optimized_visualizer = AdvancedTrajectoryVisualizer(
     trajectory_manager=optimized_trajectory,
     collision_manager=optimized_collision_manager,
-    revolut_angle_display=revolut_angle,
     display_layers=display_layers,
-    stride=stride,
-    ellipse_bool=False,
-    vector_bool=False,
-    show_collision_candidates_bool=False,
-    show_collision_candidates_segments_bool=False,
-    show_problematic_trajectory_points_bool=True,
-    collision_points=optimized_collision_points
+    revolut_angle=revolut_angle,
+    stride=stride
 )
 
-optimized_visualizer.visualize()
+# Configure geometry parameters
+optimized_visualizer.geometry_visualizer.set_parameters(
+    bead_width=bead_width,
+    bead_height=bead_height,
+    tool_radius=tool_radius,
+    tool_length=nozzle_length,
+    n_bead_points=n_bead_points,
+    n_tool_points=n_tool_points
+)
+
+# Setup visualization options
+optimized_visualizer.setup_visualization(
+    show_beads=False,
+    low_res_bead=True,
+    show_vectors=False,
+    show_tool=False,
+    show_collisions=True,
+    show_collision_candidates=False,
+    show_collision_bases=True
+)
+
+optimized_visualizer.create_figure()
+optimized_visualizer.apply_layer_filter(
+    layers=display_layers,
+    angle_limit=revolut_angle
+)
+optimized_visualizer.visualize_trajectory()
+optimized_visualizer.show()

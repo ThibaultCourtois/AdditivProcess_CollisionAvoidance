@@ -1,691 +1,752 @@
-import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+import numpy as np
+np.set_printoptions(threshold=np.inf)
+np.seterr(all='ignore')  # Ignore les avertissements numpy pour plus de vitesse
+
 
 
 """
-Trajectory Visualization Class
-
-Features:
-- Visualize parts of the trajectory (quarter, half, or complete layers)
-- Display t, n, b vectors at points with specified stride
-- Simplified bead representation using half-ellipses with custom segmentation
-- Tool visualization as infinite cylinder or using STL geometry at desired points
+Système de visualisation optimisé utilisant les bases locales pré-calculées
 """
 
-class TrajectoryVisualizer:
-    def __init__(self, trajectory_manager, collision_manager, revolut_angle_display, display_layers, stride,
-                 ellipse_bool, vector_bool, show_collision_candidates_bool,
-                 show_collision_candidates_segments_bool, show_problematic_trajectory_points_bool,
-                 collision_points=None, scale_vectors=0.1):
+# --------------------------------
+# Classe de gestion des bases locales
+# --------------------------------
+class LocalBasisManager:
+    """Encapsule l'accès aux vecteurs de base depuis TrajectoryDataManager"""
 
-        # Existing initialization code remains the same
-        self.trajectory_data = trajectory_manager
-        self.points = np.asarray(trajectory_manager.points)
-        self.build_directions = np.asarray(trajectory_manager.build_directions)
-        self.tool_directions = np.asarray(trajectory_manager.tool_directions)
-        self.layer_indices = trajectory_manager.layer_indices
-        self.extrusion_data = trajectory_manager.extrusion
+    def __init__(self, trajectory_manager=None):
+        self.trajectory_manager = trajectory_manager
+        self.update_from_manager()
 
-        # Nouveaux attributs pour stocker les bases locales
-        self.t_vectors = trajectory_manager.t_vectors
-        self.n_vectors = trajectory_manager.n_vectors
-        self.b_vectors = trajectory_manager.b_vectors
+    def update_from_manager(self):
+        """Récupère les vecteurs depuis le TrajectoryDataManager"""
+        if self.trajectory_manager:
+            self.t_vectors = self.trajectory_manager.t_vectors
+            self.n_vectors = self.trajectory_manager.n_vectors
+            self.b_vectors = self.trajectory_manager.b_vectors
+            self.tool_vectors = self.trajectory_manager.tool_directions
 
-        # Visualization control
-        self.ellipse_bool = ellipse_bool
-        self.vector_bool = vector_bool
-        self.display_layers = display_layers
-        self.stride = stride
-        self.revolute_display_angle = revolut_angle_display
-        self.angle_mask = None
+    def get_local_basis(self, index):
+        """Retourne la base locale (t,n,b) pour un point donné"""
+        return (self.t_vectors[index],
+                self.n_vectors[index],
+                self.b_vectors[index],
+                self.tool_vectors[index])
 
-        # Store collision points directly
-        self.show_problematic_trajectory_points = show_problematic_trajectory_points_bool
-        self.collision_points = collision_points
-        self.collision_manager = collision_manager
+# --------------------------------
+# Classes de visualisation géométrique
+# --------------------------------
+class GeometryVisualizer:
+    def __init__(self, basis_manager):
+        self.basis_manager = basis_manager
 
-
-        # Fixed parameters from project requirements
-        self.h_layer = collision_manager.collision_candidates_generator.h_layer
-        self.w_layer = collision_manager.collision_candidates_generator.w_layer
-        self.L_seg = 0.32  # mm (segment length)
-        self.scale_vectors = scale_vectors
-
-        # Tool visualization parameters
-        self.show_tool = False
-        self.tool_type = 'cylinder'
-        self.tool_radius = 12.5
-        self.tool_height = 100
-        self.nozzle_length = 17
-        self.n_points = 16
-        self.current_tool_position = None
-
-        # Calculus points visualization
-        self.show_collision_candidates = show_collision_candidates_bool
-        self.show_collision_candidates_segments = show_collision_candidates_segments_bool
-
-        # Setup figure and 3D axes
-        self.fig = plt.figure(figsize=(12, 8))
-        self.ax = self.fig.add_subplot(111, projection='3d')
-
-        # Add keyboard navigation parameters
-        self.current_point_index = None
-        self.visible_points = None
-        self.visible_vectors = None
-        self.visible_layers = None
-
-        # Connect keyboard events
-        self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
-
-        self.collision_manager = collision_manager
-
-    #-------------------------------------------------------------------
-    # Calculus function callback
-    #-------------------------------------------------------------------
-
-    def detect_collisions(self):
-        """Now only detects collisions if no collision points were provided"""
-        if self.collision_points is None and self.show_problematic_trajectory_points:
-            self.collision_points = self.collision_manager.detect_initial_collisions()
-        return self.collision_points
-
-    #-------------------------------------------------------------------
-    # Ellipse Generation and Visualization Methods
-    #-------------------------------------------------------------------
-    def plot_collision_points(self, points, normal_vectors, build_vectors, is_last_layer_mask):
-        """Vectorized collision points plotting"""
-        # Calculate all points at once
-        left_points = points + (self.w_layer / 2) * normal_vectors
-        right_points = points - (self.w_layer / 2) * normal_vectors
-
-        # Plot all points in one call
-        all_points = np.vstack([left_points, right_points])
-        self.ax.scatter(all_points[:, 0], all_points[:, 1], all_points[:, 2],
-                        color='darkcyan', marker='o', s=1)
-
-        if np.any(is_last_layer_mask):
-            # Handle last layer points only where needed
-            last_layer_points = points[is_last_layer_mask]
-            last_layer_build = build_vectors[is_last_layer_mask]
-            top_points = last_layer_points + self.h_layer * last_layer_build
-
-            self.ax.scatter(top_points[:, 0], top_points[:, 1], top_points[:, 2],
-                            color='darkcyan', marker='o', s=1)
-
-    def construct_half_ellipse(self, center, n_vector, b_vector, t_vector):
+    def generate_bead_geometry_for_segment(self, segment_points, t_vectors, n_vectors, b_vectors, w_layer, h_layer, low_res_bead_bool):
         """
-        Create an ellipse based on a deformed rectangle
-
-        Parameters:
-        -----------
-        center : array-like
-            Central point for the ellipse
-        n_vector : array-like
-            Normal vector to the bead
-        b_vector : array-like
-            Build direction vector
-        t_vector : array-like
-            Tangent vector for segment orientation
-
-        Returns:
-        --------
-        points : ndarray
-            Array of 3D points forming the ellipse
+        Génère la géométrie des cordons de manière optimisée avec longueur adaptative
         """
-        seg_point_num_t = 2
-        seg_point_num_n = 6
+        segment_length = len(segment_points)
+        if segment_length < 2:
+            return None
 
-        # Points creation for the rectangle
-        t_vals = np.linspace(-self.L_seg / 2, self.L_seg / 2, seg_point_num_t)
-        n_vals = np.linspace(-self.w_layer / 2, self.w_layer / 2, seg_point_num_n)
+        if low_res_bead_bool:
+            # Réduction du nombre de points pour les performances
+            n_section_points = 4
+        else :
+            n_section_points = 8
 
-        # horizontals (n = -w_layer/2, n = w_layer/2)
-        points_h1 = [center + t * t_vector + (-self.w_layer / 2) * n_vector for t in t_vals]
-        points_h2 = [center + t * t_vector + self.w_layer / 2 * n_vector for t in reversed(t_vals)]
+        # Pour chaque point du segment, générer une demi-ellipse
+        all_sections = []
 
-        # vertical (t = L_seg/2)
-        points_v1 = [center + n * n_vector + (-self.L_seg / 2 * t_vector) for n in n_vals]
-        points_v2 = [center + n * n_vector + self.L_seg / 2 * t_vector for n in reversed(n_vals)]
+        for i in range(segment_length):
+            point = segment_points[i]
+            t = t_vectors[i] / np.linalg.norm(t_vectors[i])
+            n = n_vectors[i] / np.linalg.norm(n_vectors[i])
+            b = b_vectors[i] / np.linalg.norm(b_vectors[i])
 
-        ellipse_points = np.concatenate((np.array(points_h1), np.array(points_v1),np.array(points_h2), np.array(points_v2)))
+            # Calcul de la longueur adaptative basée sur les points adjacents
+            if i > 0:
+                prev_dist = np.linalg.norm(segment_points[i] - segment_points[i - 1])
+            else:
+                prev_dist = 0
 
-        # Create height deformation with a sinusoïdal function by normalizing distances between the center of the
-        # rectangle and points of the rectangle between 0 and 1
-        distances_to_center = np.linalg.norm(ellipse_points - center, axis=1)
-        max_distance = np.max(distances_to_center)
+            if i < segment_length - 1:
+                next_dist = np.linalg.norm(segment_points[i] - segment_points[i + 1])
+            else:
+                next_dist = 0
 
-        height_factors = np.cos(distances_to_center / max_distance * np.pi / 2)
-        height_variation = (self.h_layer/2) * height_factors[:, np.newaxis] * b_vector # 3D deformation vector
+            # Longueur adaptative avec limites
+            L_seg = np.mean([d for d in [prev_dist, next_dist] if d > 0])
+            L_seg = np.clip(L_seg, 0.2, 1.0)  # Limites min/max en mm
 
-        ellipse_points = ellipse_points + height_variation
+            # Points du rectangle de base (optimisé)
+            n_vals = np.linspace(-w_layer / 2, w_layer / 2, n_section_points)
+            section_points = []
 
-        return ellipse_points
+            # Construction optimisée des points
+            for n_val in n_vals:
+                # Points avant
+                section_points.append(point + n_val * n + L_seg / 2 * t)
+            # Points arrière (en ordre inverse)
+            for n_val in reversed(n_vals):
+                section_points.append(point + n_val * n - L_seg / 2 * t)
 
-    @staticmethod
-    def plot_ellipse(ellipse_points, ax):
+            section_points = np.array(section_points)
+
+            # Déformation en demi-ellipse (calcul optimisé)
+            distances = np.abs(section_points - point)
+            max_distance = np.max(np.linalg.norm(distances, axis=1))
+            height_factors = np.cos(np.linalg.norm(distances, axis=1) / max_distance * np.pi / 2)
+            height_variation = (h_layer / 2) * height_factors[:, np.newaxis] * b
+
+            section = section_points + height_variation
+            all_sections.append(section)
+
+        return all_sections
+
+    def plot_bead_sections(self, ax, sections):
         """
-        Visualize ellipse with black outline and gray filling
-
-        Parameters:
-        -----------
-        ellipse_points : ndarray
-            Points defining the ellipse
-        ax : Axes3D
-            Matplotlib 3D axes for plotting
+        Version corrigée du tracé des sections avec gestion appropriée des vertices
         """
-        # Black outline creation
-        # Closing the outline
-        points_closed = np.append(ellipse_points, [ellipse_points[0]], axis=0)
-        ax.plot(points_closed[:, 0],
-                points_closed[:, 1],
-                points_closed[:, 2],
-                'k-', linewidth=1)
+        aluminum_color = '#D3D3D3'
 
-        # Filling with gray polygons
-        vertices = [list(zip(points_closed[:, 0],
-                             points_closed[:, 1],
-                             points_closed[:, 2]))]
-        poly = Poly3DCollection(vertices, alpha=0.3, color='gray')
-        ax.add_collection3d(poly)
+        for section in sections:
+            n_points = len(section)
+            mid_point = n_points // 2
 
-    #-------------------------------------------------------------------
-    # Tool Visualization Methods
-    #-------------------------------------------------------------------
+            # Création optimisée des surfaces
+            for i in range(mid_point - 1):
+                # Création d'un quadrilatère avec les 4 points dans le bon format
+                # Convert numpy arrays to lists to ensure proper formatting
+                quad = [
+                    section[i].tolist(),
+                    section[i + 1].tolist(),
+                    section[-(i + 2)].tolist(),
+                    section[-(i + 1)].tolist(),
+                ]
 
-    def set_tool_parameters(self, radius, height, nozzle_length):
-        """
-        Set tool visualization parameters
+                # Créer la collection avec un seul quad à la fois
+                poly = Poly3DCollection([quad])
+                poly.set_facecolor(aluminum_color)
+                poly.set_edgecolor('black')
+                poly.set_linewidth(0.1)
+                poly.set_rasterized(True)
+                poly.set_zsort('min')
+                ax.add_collection3d(poly)
 
-        Parameters:
-        -----------
-        radius : float
-            Radius for cylinder visualization
-        height : float
-            Height for cylinder visualization
-        stl_path : str
-            Path to STL file for STL visualization
-        """
-        if radius is not None:
-            self.tool_radius = radius
-        if height is not None:
-            self.tool_height = height
-        if nozzle_length is not None:
-            self.nozzle_length = nozzle_length
+    def generate_tool_geometry(self, point, tool_dir):
+        """Génère la géométrie 3D de l'outil de façon robuste"""
+        # Normalisation de la direction
+        tool_dir = tool_dir / np.linalg.norm(tool_dir)
 
-    def update_tool_visualization(self):
-        """
-        Updates the tool visualization
-        """
-        # Clear previous tool visualization
-        if self.current_tool_position is not None:
-            # Remove surface plots
-            for collection in self.ax.collections:
-                if hasattr(collection, 'tool_surface') and collection.tool_surface:
-                    collection.remove()
-
-            # Remove tool lines
-            lines_to_remove = []
-            for line in self.ax.lines:
-                if hasattr(line, 'tool_line') and line.tool_line:
-                    lines_to_remove.append(line)
-            for line in lines_to_remove:
-                line.remove()
-
-        # Update tool visualization if enabled
-        if self.show_tool and self.current_point_index is not None:
-            position = self.visible_points[self.current_point_index]
-            direction = self.visible_tool_vector[self.current_point_index]
-            self.visualize_simplified_tool(position, direction)
-            self.current_tool_position = position
-        self.fig.canvas.draw()
-
-    def create_tool_geometry(self, center, direction, radius, height, nozzle_length, n_points):
-        """
-        Create points for tool visualization with nozzle with constant radius
-        """
-        # Normalize direction
-        direction = direction / np.linalg.norm(direction)
-
-        # Create circle points for cylinder
-        theta = np.linspace(0, 2 * np.pi, n_points)
-        x = radius * np.cos(theta)
-        y = radius * np.sin(theta)
-        z = np.zeros_like(theta)
-        circle_points = np.column_stack((x, y, z))
-
-        # Create orthonormal basis with direction as z-axis
-        z_axis = direction
-
-        # Choose x_axis vector to avoid singularities
+        # Construction d'une base orthonormale robuste
+        z_axis = tool_dir
         if abs(z_axis[0]) < 1e-6 and abs(z_axis[1]) < 1e-6:
-            # If z_axis is close to (0,0,±1)
             x_axis = np.array([1.0, 0.0, 0.0])
         else:
-            # Use cross product with (0,0,1) to get perpendicular vector
             x_axis = np.cross(z_axis, np.array([0.0, 0.0, 1.0]))
-
-        # Normalize x_axis
         x_axis = x_axis / np.linalg.norm(x_axis)
-
-        # Get y_axis through cross product
         y_axis = np.cross(z_axis, x_axis)
-        y_axis = y_axis / np.linalg.norm(y_axis)
 
-        # Recalculate x_axis to ensure orthogonality
-        x_axis = np.cross(y_axis, z_axis)
+        # Génération des points du cylindre
+        theta = np.linspace(0, 2 * np.pi, self.n_tool_points)
+        circle_points = np.column_stack((
+            self.tool_radius * np.cos(theta),
+            self.tool_radius * np.sin(theta),
+            np.zeros_like(theta)
+        ))
 
-        # Create rotation matrix
+        # Application de la transformation
         rotation_matrix = np.column_stack((x_axis, y_axis, z_axis))
+        nozzle_end = point + self.nozzle_length * tool_dir
 
-        # Transform circle points
-        cylinder_base = np.dot(circle_points, rotation_matrix.T)
-        cylinder_top = cylinder_base + height * direction
+        # Création des cercles de base et sommet
+        base_circle = np.dot(circle_points, rotation_matrix.T) + nozzle_end
+        top_circle = base_circle + self.tool_height * tool_dir
 
-        # Create nozzle points
-        nozzle_start = center
-        nozzle_end = center + nozzle_length * direction
-        nozzle_points = np.array([nozzle_start, nozzle_end])
+        return {
+            'base': base_circle,
+            'top': top_circle,
+            'nozzle_start': point,
+            'nozzle_end': nozzle_end
+        }
 
-        # Translate cylinder to position
-        cylinder_base += (center + nozzle_length * direction)
-        cylinder_top += (center + nozzle_length * direction)
+    def set_parameters(self, bead_width=None, bead_height=None,
+                       tool_radius=None, tool_length=None, n_bead_points = None, nozzle_length = None, n_tool_points = None):
+        """Configure les paramètres géométriques"""
+        # Paramètres de l'outil
+        if tool_radius:
+            self.tool_radius = tool_radius
+        if tool_length:
+            self.tool_height = tool_length
+        if bead_width:
+            self.bead_width = bead_width
+        if bead_height:
+            self.bead_height = bead_height
+        if n_bead_points:
+            self.n_bead_points = n_bead_points
+        if nozzle_length:
+            self.nozzle_length = nozzle_length
+        if n_tool_points:
+            self.n_tool_points = n_tool_points
 
-        return cylinder_base, cylinder_top, nozzle_points
+# --------------------------------
+# Classe principale de visualisation
+# --------------------------------
+class AdvancedTrajectoryVisualizer:
+    """Gestionnaire principal de la visualisation"""
 
-    def visualize_simplified_tool(self, position, direction):
-        """
-        Visualize tool as simple cylinder with nozzle line
-        """
-        # Create tool geometry
-        base_points, top_points, nozzle_points = self.create_tool_geometry(
-            position, direction,
-            radius=self.tool_radius,
-            height=self.tool_height,
-            nozzle_length=self.nozzle_length,
-            n_points = self.n_points
-        )
+    def __init__(self, trajectory_manager=None, collision_manager=None, display_layers=None,
+                 revolut_angle=360, stride=1):
+        self.trajectory_manager = trajectory_manager
+        self.collision_manager = collision_manager
+        self.basis_manager = LocalBasisManager(trajectory_manager)
+        self.geometry_visualizer = GeometryVisualizer(self.basis_manager)
+        self.collision_points = None
+        if collision_manager:
+            self.collision_points = collision_manager.detect_collisions_optimized()
+            #self.collision_points = collision_manager.detect_collisions_exhaustive()
 
-        # Plot cylinder surface - simplest way but keeping radius constant
-        cylinder_x = np.vstack((base_points[:, 0], top_points[:, 0]))
-        cylinder_y = np.vstack((base_points[:, 1], top_points[:, 1]))
-        cylinder_z = np.vstack((base_points[:, 2], top_points[:, 2]))
+        # Paramètres de visualisation
+        self.display_layers = display_layers or []
+        self.revolut_angle = revolut_angle
+        self.stride = stride
 
-        # Plot cylinder with transparency
-        surf = self.ax.plot_surface(cylinder_x, cylinder_y, cylinder_z, color='gray', alpha=0.3)
-        surf.tool_surface = True
+        # États de visualisation
+        self.show_beads = False
+        self.show_tool = False
+        self.show_vectors = False
+        self.show_collisions = False
+        self.low_res_bead = True
+        self.show_collision_candidates = False
+        self.show_collision_bases = False
 
-        # Plot base and top circles
-        line1 = self.ax.plot(np.append(base_points[:, 0], base_points[0, 0]),
-                             np.append(base_points[:, 1], base_points[0, 1]),
-                             np.append(base_points[:, 2], base_points[0, 2]),
-                             'k-', linewidth=0.5)[0]
-        line2 = self.ax.plot(np.append(top_points[:, 0], top_points[0, 0]),
-                             np.append(top_points[:, 1], top_points[0, 1]),
-                             np.append(top_points[:, 2], top_points[0, 2]),
-                             'k-', linewidth=0.5)[0]
-        line1.tool_line = True
-        line2.tool_line = True
+        # Navigation
+        self.current_point = 0
+        self.visible_points = None
+        self.visible_indices = None
 
-        # Plot nozzle line
-        line = self.ax.plot(nozzle_points[:, 0], nozzle_points[:, 1], nozzle_points[:, 2],
-                            'k-', linewidth=2.0)[0]
-        line.tool_line = True
+        # Figure matplotlib
+        self.fig = None
+        self.ax = None
 
-    #-------------------------------------------------------------------
-    # Main Visualization Methods
-    #-------------------------------------------------------------------
-    def main_visualization(self):
-        """
-        Main plotting function for trajectory visualization
-        """
-        if self.show_problematic_trajectory_points:
-            if self.collision_points is None:
-                self.detect_collisions()
+        self.tool_artists = []
 
-        # Get points and vectors for selected layers
-        self.update_visible_points_vectors()
 
-        # Get the layer indices
-        start_idx, end_idx = self.get_layer_points_range()
 
-        # Get the last displayed layer index and its ending point index
-        max_displayed_layer = max(self.display_layers)
-        last_layer_start_idx = self.layer_indices[max_displayed_layer - 1] if max_displayed_layer > 0 else 0
-        last_layer_end_idx = self.layer_indices[max_displayed_layer]
+    def setup_visualization(self, show_beads=False, low_res_bead=True, show_tool=False,
+                          show_vectors=False, show_collisions=False, show_collision_candidates=False, show_collision_bases=False):
+        """Configure les options de visualisation"""
+        self.show_beads = show_beads
+        self.show_tool = show_tool
+        self.show_vectors = show_vectors
+        self.show_collisions = show_collisions
+        self.low_res_bead = low_res_bead
+        self.show_collision_candidates = show_collision_candidates
+        self.show_collision_bases = show_collision_bases
 
-        # Plot filtered trajectory with discontinuity handling
-        segments = []
-        current_segment = []
-        max_angle_diff = 6
+    def apply_layer_filter(self, layers=None, angle_limit=None):
+        """Filtre les points avec prise en compte de l'extrusion."""
+        if not layers:
+            return
 
-        for i in range(len(self.points)):
-            if self.angle_mask[i]:
-                # First point of the segment?
-                if not current_segment:
-                    current_segment.append(self.points[i])
-                else:
-                    # Calculate angles between consecutive points
-                    prev_angle = np.degrees(np.arctan2(current_segment[-1][1], current_segment[-1][0]))
-                    curr_angle = np.degrees(np.arctan2(self.points[i][1], self.points[i][0]))
+        # Récupération des indices de début et fin
+        start_idx = self.trajectory_manager.layer_indices[min(layers)]
+        end_idx = (self.trajectory_manager.layer_indices[max(layers) + 1]
+                   if max(layers) + 1 < len(self.trajectory_manager.layer_indices)
+                   else len(self.trajectory_manager.points))
 
-                    # Normalize angles to [0, 360] range
-                    prev_angle = prev_angle if prev_angle >= 0 else prev_angle + 360
-                    curr_angle = curr_angle if curr_angle >= 0 else curr_angle + 360
+        # Sélection des points et vecteurs
+        selected_points = self.trajectory_manager.points[start_idx:end_idx]
+        selected_t = self.basis_manager.t_vectors[start_idx:end_idx]
+        selected_n = self.basis_manager.n_vectors[start_idx:end_idx]
+        selected_b = self.basis_manager.b_vectors[start_idx:end_idx]
+        selected_tool = self.trajectory_manager.tool_directions[start_idx:end_idx]
+        selected_extrusion = self.trajectory_manager.extrusion[start_idx:end_idx]
 
-                    angle_diff = min(abs(curr_angle - prev_angle),
-                                     abs(curr_angle - prev_angle + 360),
-                                     abs(curr_angle - prev_angle - 360))
+        # Application du filtre par angle
+        if angle_limit is not None and angle_limit != 360:
+            angles = np.degrees(np.arctan2(selected_points[:, 1], selected_points[:, 0]))
+            angles = np.where(angles < 0, angles + 360, angles)
+            angle_mask = angles <= angle_limit
 
-                    if angle_diff <= max_angle_diff:
-                        current_segment.append(self.points[i])
-                    else:
-                        if len(current_segment) > 1:
-                            segments.append(np.array(current_segment))
-                        current_segment = [self.points[i]]
-            elif current_segment:
-                # Close current segment if outside angle mask
-                if len(current_segment) > 1:
-                    segments.append(np.array(current_segment))
-                current_segment = []
+            selected_points = selected_points[angle_mask]
+            selected_t = selected_t[angle_mask]
+            selected_n = selected_n[angle_mask]
+            selected_b = selected_b[angle_mask]
+            selected_tool = selected_tool[angle_mask]
+            selected_extrusion = selected_extrusion[angle_mask]
 
-        # Add final segment if needed
-        if current_segment and len(current_segment) > 1:
-            segments.append(np.array(current_segment))
+            # Stocker les indices filtrés et visibles
+            global_indices = np.arange(start_idx, end_idx)[angle_mask]
+        else:
+            global_indices = np.arange(start_idx, end_idx)
 
-        # Plot trajectory segments
-        for segment_idx, segment in enumerate(segments):
-            self.ax.plot(segment[:, 0], segment[:, 1], segment[:, 2],
-                         'k-', label='Trajectory' if segment is segments[0] else "",
-                         alpha=1)
+        self.visible_points = selected_points
+        self.visible_t_vector = selected_t
+        self.visible_n_vector = selected_n
+        self.visible_b_vector = selected_b
+        self.visible_tool_vector = selected_tool
+        self.visible_extrusion = selected_extrusion
 
-            # Mise à jour pour utiliser les vecteurs précalculés
-        if self.vector_bool or self.ellipse_bool or self.show_collision_candidates:
-            # Plus besoin de recalculer les vecteurs ici
-            # On utilise directement les vecteurs visibles mis à jour dans update_visible_points_vectors()
-            if self.vector_bool:
-                self.plot_direction_vectors(
-                    points=self.visible_points[::self.stride],
-                    t_vectors=self.visible_t_vector[::self.stride],
-                    n_vectors=self.visible_n_vector[::self.stride],
-                    b_vectors=self.visible_b_vector[::self.stride],
-                    tool_vectors=self.visible_tool_vector[::self.stride]
-                )
+        # Mapping des indices globaux vers indices visibles
+        self.global_to_visible_indices = {global_idx: local_idx for local_idx, global_idx in enumerate(global_indices)}
 
-            if self.ellipse_bool:
-                # Plot ellipse geometry for each point
-                for i in range(0, len(self.visible_points), self.stride):
-                    ellipse_points = self.construct_half_ellipse(
-                        self.visible_points[i],
-                        self.visible_n_vector[i],
-                        self.visible_b_vector[i],
-                        self.visible_t_vector[i]
-                    )
-                    self.plot_ellipse(ellipse_points, self.ax)
+        # Stocker les indices visibles
+        self.visible_indices = global_indices
 
-            if self.show_collision_candidates:
-                # Plot collision points for debugging
-                for i in range(0, len(self.visible_points), self.stride):
-                    total_idx = start_idx + i
-                    is_last_layer = (total_idx >= last_layer_start_idx) and (total_idx < last_layer_end_idx)
-                    self.plot_collision_points(
-                        self.visible_points[i],
-                        self.visible_n_vector[i],
-                        self.visible_t_vector[i],
-                        is_last_layer
-                    )
+    def create_figure(self):
+        """Crée et configure la figure matplotlib avec optimisations avancées"""
+        self.fig = plt.figure(figsize=(12, 8), dpi=100)  # Réduit la résolution
+        self.ax = self.fig.add_subplot(111, projection='3d')
 
-        # After plotting the trajectory but before vectors/ellipses
-        if self.show_problematic_trajectory_points:
-            # Utiliser verify_collisions à la place
-            collision_count, residual_points = self.collision_manager.verify_collisions()
-
-            if len(residual_points) > 0:  # S'il y a des points à visualiser
-                # Get indices for the selected layers
-                start_idx, end_idx = self.get_layer_points_range()
-
-                # Filter residual points within our layer range
-                layer_mask = (np.array(residual_points) >= start_idx) & (np.array(residual_points) < end_idx)
-                layer_residual_points = np.array(residual_points)[layer_mask]
-
-                # Apply angle filtering
-                residual_coordinates = self.trajectory_data.points[layer_residual_points]
-                collision_angles = np.degrees(np.arctan2(residual_coordinates[:, 1], residual_coordinates[:, 0]))
-                collision_angles = np.where(collision_angles < 0, collision_angles + 360, collision_angles)
-                angle_mask = collision_angles <= self.revolute_display_angle
-
-                # Filter collision points by angle
-                final_collision_points = residual_coordinates[angle_mask]
-                final_point_indices = layer_residual_points[angle_mask]
-
-                print(f"Total number of residual collisions: {collision_count}")
-                print(f"Number of collisions in selected layers: {len(layer_residual_points)}")
-                print(f"Number of visible collisions after angle filtering: {len(final_collision_points)}")
-                print(f"Points with collisions: {final_point_indices.tolist()}")
-
-                if len(final_collision_points) > 0:
-                    # Visualiser les points problématiques
-                    self.ax.scatter(
-                        final_collision_points[:, 0],
-                        final_collision_points[:, 1],
-                        final_collision_points[:, 2],
-                        color='red',
-                        s=10,
-                        marker='x',
-                        label='Residual collisions',
-                        zorder=10,
-                        linewidth=1
-                    )
-
-        # Set labels and title
+        # Optimisations de rendu
         self.ax.set_xlabel('X')
         self.ax.set_ylabel('Y')
         self.ax.set_zlabel('Z')
 
-        layer_str = ", ".join(str(l) for l in sorted(self.display_layers))
-        self.ax.set_title(f'Trajectory with bead geometry - Layers: {layer_str}')
+        # Désactive complètement les panneaux de fond
+        self.ax.xaxis.pane.fill = False
+        self.ax.yaxis.pane.fill = False
+        self.ax.zaxis.pane.fill = False
 
-        # Add legend and set aspect ratio
-        self.ax.legend()
-        # Force equal scaling on all axes
-        self.ax.set_box_aspect([1, 1, 1])
+        # Désactive les grilles pour améliorer les performances
+        self.ax.grid(False)
 
-        # For graphic axe scale purposes
-        x_range = np.ptp(self.visible_points[:, 0])
-        y_range = np.ptp(self.visible_points[:, 1])
-        z_range = np.ptp(self.visible_points[:, 2])
+        # Désactive le calcul automatique des limites
+        self.ax.autoscale(enable=False)
 
-        # Set same scales for all axes
-        max_range = np.array([x_range, y_range, z_range]).max()
-        mid_x = (self.visible_points[:, 0].max() + self.visible_points[:, 0].min()) * 0.5
-        mid_y = (self.visible_points[:, 1].max() + self.visible_points[:, 1].min()) * 0.5
-        mid_z = (self.visible_points[:, 2].max() + self.visible_points[:, 2].min()) * 0.5
-        self.ax.set_xlim(mid_x - max_range * 0.5, mid_x + max_range * 0.5)
-        self.ax.set_ylim(mid_y - max_range * 0.5, mid_y + max_range * 0.5)
-        self.ax.set_zlim(mid_z - max_range * 0.5, mid_z + max_range * 0.5)
+        # Utilise une projection orthographique (plus rapide)
+        self.ax.set_proj_type('ortho')
 
-    #-------------------------------------------------------------------
-    # Utility Methods
-    #-------------------------------------------------------------------
+        # Désactive l'anti-aliasing
+        self.fig.set_facecolor('white')
+        self.ax.set_facecolor('white')
 
-    def get_layer_points_range(self):
-        """
-        Calculate start and end indices for layer display
+        # Connecter les événements
+        self.fig.canvas.mpl_connect('key_press_event', self.handle_keyboard)
 
-        Returns:
-        --------
-        tuple : (start_idx, end_idx)
-            Start and end indices for the selected layers
+    def visualize_trajectory(self):
+        """Visualisation de la trajectoire avec gestion des sauts par extrusion"""
+        if not self.fig:
+            self.create_figure()
 
-        Raises:
-        -------
-        ValueError
-            If layer index is out of range
-        """
-        if not self.display_layers:
-            return 0, 0
+        # Application des filtres
+        self.apply_layer_filter(self.display_layers, self.revolut_angle)
 
-        max_layer = max(self.display_layers)
-        if max_layer >= len(self.layer_indices):
-            raise ValueError(f"Layer index {max_layer} is out of range. Max layer is {len(self.layer_indices) - 1}")
+        # Séparation en segments basée sur l'extrusion
+        points = self.visible_points
+        segments = []
+        current_segment = []
 
-        start_idx = 0
-        if min(self.display_layers) > 0:
-            start_idx = self.layer_indices[min(self.display_layers)]
+        # Index de début pour le filtrage
+        start_idx = self.trajectory_manager.layer_indices[min(self.display_layers)]
 
-        end_idx = self.layer_indices[max_layer]
-        return start_idx, end_idx
+        for i in range(len(points)):
+            if self.visible_extrusion[i] == 1:  # Point avec extrusion
+                if len(current_segment) == 0 or self.visible_extrusion[i - 1] == 1:
+                    current_segment.append(points[i])
+                else:
+                    # Nouveau segment si on vient d'un point sans extrusion
+                    if len(current_segment) > 1:
+                        segments.append(np.array(current_segment))
+                    current_segment = [points[i]]
+            else:
+                # Fermeture du segment en cours si existe
+                if len(current_segment) > 1:
+                    segments.append(np.array(current_segment))
+                current_segment = []
 
-    def update_visible_points_vectors(self):
-        """Met à jour les points et vecteurs visibles en appliquant les filtres"""
-        start_idx, end_idx = self.get_layer_points_range()
+        # Ajout du dernier segment
+        if len(current_segment) > 1:
+            segments.append(np.array(current_segment))
 
-        if start_idx == end_idx:
-            print("No layers to display")
+        # Tracé des segments
+        for i, segment in enumerate(segments):
+            self.ax.plot(segment[:, 0], segment[:, 1], segment[:, 2],
+                         'k-', label='Trajectory' if i == 0 else "")
+
+        # Ajout des éléments optionnels
+        if self.show_vectors:
+            self._draw_vectors()
+        if self.show_beads:
+            self._draw_beads()
+        if self.show_collisions:
+            self._draw_collisions()
+        if self.show_tool:
+            self.update_tool_visualization()
+        if self.show_collision_candidates:
+            self.visualize_collision_candidates(
+                self.visible_points,
+                self.visible_n_vector,
+                self.visible_b_vector
+            )
+        if self.show_collision_bases:
+            self._draw_collision_bases()
+        # Configuration des limites et aspect
+        self._setup_plot_limits()
+
+    def update_tool_visualization(self):
+        """Met à jour la visualisation de l'outil de façon robuste"""
+        # Nettoyage des anciens éléments
+        for artist in self.tool_artists:
+            artist.remove()
+        self.tool_artists.clear()
+
+        if not self.show_tool or self.current_point is None:
             return
 
-        # Appliquer le stride tôt dans le processus
-        indices = np.arange(start_idx, end_idx)
-        points = self.points[indices]
+        # Récupération des données géométriques
+        point = self.visible_points[self.current_point]
+        tool_dir = self.visible_tool_vector[self.current_point]
 
-        # Utiliser directement les vecteurs précalculés
-        t_vector = self.t_vectors[indices]
-        n_vector = self.n_vectors[indices]
-        b_vector = self.b_vectors[indices]
-        tool_vector = self.tool_directions[indices]
+        # Génération de la géométrie
+        geom = self.geometry_visualizer.generate_tool_geometry(point, tool_dir)
 
-        # Calculer les angles pour le masque de visibilité
-        xy_angles = np.degrees(np.arctan2(points[:, 1], points[:, 0]))
-        xy_angles = np.where(xy_angles < 0, xy_angles + 360, xy_angles)
-        angle_mask = xy_angles <= self.revolute_display_angle
+        # Création du cylindre
+        for circle in [geom['base'], geom['top']]:
+            # Fermeture du cercle
+            circle_closed = np.vstack([circle, circle[0]])
+            line = self.ax.plot(circle_closed[:, 0],
+                                circle_closed[:, 1],
+                                circle_closed[:, 2],
+                                'k-', linewidth=0.5)[0]
+            self.tool_artists.append(line)
 
-        self.points = points
-        self.angle_mask = angle_mask
-        self.visible_points = points[angle_mask][::self.stride]
-        self.visible_t_vector = t_vector[angle_mask][::self.stride]
-        self.visible_n_vector = n_vector[angle_mask][::self.stride]
-        self.visible_b_vector = b_vector[angle_mask][::self.stride]
-        self.visible_tool_vector = tool_vector[angle_mask][::self.stride]
+        # Surface du cylindre
+        cylinder_x = np.vstack((geom['base'][:, 0], geom['top'][:, 0]))
+        cylinder_y = np.vstack((geom['base'][:, 1], geom['top'][:, 1]))
+        cylinder_z = np.vstack((geom['base'][:, 2], geom['top'][:, 2]))
 
-        if self.current_point_index is None and len(self.visible_points) > 0:
-            self.current_point_index = 0
+        surf = self.ax.plot_surface(cylinder_x, cylinder_y, cylinder_z,
+                                    color='gray', alpha=0.3)
+        self.tool_artists.append(surf)
 
-    def plot_direction_vectors(self, points, t_vectors, n_vectors, b_vectors, tool_vectors):
-        """Optimized vector plotting with optional tool vectors"""
-        # Initialize lists for plotting
+        # Ligne de la buse
+        line = self.ax.plot([geom['nozzle_start'][0], geom['nozzle_end'][0]],
+                            [geom['nozzle_start'][1], geom['nozzle_end'][1]],
+                            [geom['nozzle_start'][2], geom['nozzle_end'][2]],
+                            'k-', linewidth=2.0)[0]
+        self.tool_artists.append(line)
+
+        self.fig.canvas.draw()
+
+    def _draw_beads(self):
+        """Dessine les cordons en utilisant l'approche par segments"""
+        if len(self.visible_indices) < 1:
+            return
+
+        # Paramètres du cordon
+        w_layer = self.collision_manager.collision_candidates_generator.w_layer
+        h_layer = self.collision_manager.collision_candidates_generator.h_layer
+
+        # Segmentation de la trajectoire
+        points = self.visible_points
+        segments = []
+        current_segment = []
+        current_t = []
+        current_n = []
+        current_b = []
+
+        for i in range(len(points)):
+            if self.visible_extrusion[i] == 1:
+                if len(current_segment) == 0 or self.visible_extrusion[i - 1] == 1:
+                    # Ajout au segment courant
+                    current_segment.append(points[i])
+                    current_t.append(self.visible_t_vector[i])
+                    current_n.append(self.visible_n_vector[i])
+                    current_b.append(self.visible_b_vector[i])
+                else:
+                    # Nouveau segment
+                    if len(current_segment) > 1:
+                        segments.append({
+                            'points': np.array(current_segment),
+                            't_vectors': np.array(current_t),
+                            'n_vectors': np.array(current_n),
+                            'b_vectors': np.array(current_b)
+                        })
+                    current_segment = [points[i]]
+                    current_t = [self.visible_t_vector[i]]
+                    current_n = [self.visible_n_vector[i]]
+                    current_b = [self.visible_b_vector[i]]
+            else:
+                # Fin du segment courant
+                if len(current_segment) > 1:
+                    segments.append({
+                        'points': np.array(current_segment),
+                        't_vectors': np.array(current_t),
+                        'n_vectors': np.array(current_n),
+                        'b_vectors': np.array(current_b)
+                    })
+                current_segment = []
+                current_t = []
+                current_n = []
+                current_b = []
+
+        # Ajout du dernier segment si nécessaire
+        if len(current_segment) > 1:
+            segments.append({
+                'points': np.array(current_segment),
+                't_vectors': np.array(current_t),
+                'n_vectors': np.array(current_n),
+                'b_vectors': np.array(current_b)
+            })
+
+        # Tracé des segments
+        for segment in segments:
+            sections = self.geometry_visualizer.generate_bead_geometry_for_segment(
+                segment['points'],
+                segment['t_vectors'],
+                segment['n_vectors'],
+                segment['b_vectors'],
+                w_layer,
+                h_layer,
+                self.low_res_bead
+            )
+            if sections:
+                self.geometry_visualizer.plot_bead_sections(self.ax, sections)
+
+    def _draw_vectors(self):
+        """Dessine les vecteurs avec gestion plus stricte des vecteurs tool"""
         plot_points = []
         plot_vectors = []
         colors = []
-        labels = []
 
-        # Add base vectors
-        for i in range(len(points)):
-            # Add point and vectors for local basis
-            plot_points.extend([points[i], points[i], points[i]])
-            plot_vectors.extend([b_vectors[i], t_vectors[i], n_vectors[i]])
-            colors.extend(['red', 'blue', 'green'])
-            if i == 0:  # Add labels only for the first point
-                labels.extend(['Build direction', 'Tangent direction', 'Normal direction'])
-            else:
-                labels.extend(['', '', ''])
+        for i in range(0, len(self.visible_points), self.stride):
+            point = self.visible_points[i]
+            t = self.visible_t_vector[i]
+            n = self.visible_n_vector[i]
+            b = self.visible_b_vector[i]
+            tool = self.visible_tool_vector[i]
 
-        # Convert to numpy arrays for efficient handling
+            # Ajout des vecteurs de base
+            plot_points.extend([point, point, point])
+            plot_vectors.extend([t, n, b])
+            colors.extend(['blue', 'green', 'red'])
+
+            # Vérification plus stricte pour le vecteur tool
+            norm_b = b / np.linalg.norm(b)
+            norm_tool = tool / np.linalg.norm(tool)
+            angle_diff = np.arccos(np.clip(np.dot(norm_b, norm_tool), -1.0, 1.0))
+
+            # N'afficher le vecteur tool que si l'angle est significatif (>5 degrés)
+            if np.degrees(angle_diff) > 5:
+                plot_points.append(point)
+                plot_vectors.append(tool)
+                colors.append('orange')
+
+        # Tracé vectorisé
         plot_points = np.array(plot_points)
         plot_vectors = np.array(plot_vectors)
 
-        # Add tool vectors if different from build vectors
-        if tool_vectors is not None:
-            # Normalize vectors for comparison
-            norm_tool = tool_vectors / np.linalg.norm(tool_vectors, axis=1, keepdims=True)
-            norm_build = b_vectors / np.linalg.norm(b_vectors, axis=1, keepdims=True)
+        if len(plot_points) > 0:
+            self.ax.quiver(
+                plot_points[:, 0], plot_points[:, 1], plot_points[:, 2],
+                plot_vectors[:, 0], plot_vectors[:, 1], plot_vectors[:, 2],
+                colors=colors, normalize=True
+            )
 
-            # Calculate difference between normalized vectors
-            diff = np.linalg.norm(norm_tool - norm_build, axis=1)
-            mask = diff > 1e-6  # Tolerance threshold
+            # Légende avec uniquement les vecteurs tool significatifs
+            from matplotlib.lines import Line2D
+            legend_elements = [
+                Line2D([0], [0], color='blue', label='Tangent direction'),
+                Line2D([0], [0], color='green', label='Normal direction'),
+                Line2D([0], [0], color='red', label='Build direction')
+            ]
+            if 'orange' in colors:
+                legend_elements.append(Line2D([0], [0], color='orange', label='Tool direction'))
+
+            self.ax.legend(handles=legend_elements)
+
+    def _draw_collisions(self):
+        """Dessine les points de collision avec une taille réduite"""
+        if self.collision_manager and self.collision_points is not None:
+            # Ne garder que les collisions des points visibles
+            collision_indices = np.where(self.collision_points)[0]
+            mask = np.isin(collision_indices, self.visible_indices)
 
             if np.any(mask):
-                # Add points where tool vector differs from build vector
-                diff_points = points[mask]
-                diff_vectors = tool_vectors[mask]
+                collision_points = self.trajectory_manager.points[collision_indices[mask]]
+                self.ax.scatter(collision_points[:, 0],
+                                collision_points[:, 1],
+                                collision_points[:, 2],
+                                c='red', marker='x', s=3,  # Taille réduite des marqueurs
+                                label='Collisions')
 
-                plot_points = np.vstack([plot_points, diff_points])
-                plot_vectors = np.vstack([plot_vectors, diff_vectors])
-                colors.extend(['orange'] * np.sum(mask))
-                labels.extend(['Tool direction' if i == 0 else '' for i in range(np.sum(mask))])
+    def _draw_collision_bases(self):
+        """Dessine les bases locales aux points de collision."""
+        if self.collision_manager and self.collision_points is not None:
+            # Obtenir les indices globaux des points en collision
+            collision_indices = self.collision_manager.get_collision_indices()
 
-        # Single quiver call with all vectors
-        self.ax.quiver(
-            plot_points[:, 0], plot_points[:, 1], plot_points[:, 2],
-            plot_vectors[:, 0], plot_vectors[:, 1], plot_vectors[:, 2],
-            colors=colors,
-            normalize=True
-        )
+            # Mapper vers les indices visibles
+            visible_collision_indices = [
+                self.global_to_visible_indices[global_idx]
+                for global_idx in collision_indices
+                if global_idx in self.global_to_visible_indices
+            ]
 
-        # Add legend manually for unique labels
-        from matplotlib.lines import Line2D
-        legend_elements = [
-            Line2D([0], [0], color='red', label='Build direction'),
-            Line2D([0], [0], color='blue', label='Tangent direction'),
-            Line2D([0], [0], color='green', label='Normal direction')
-        ]
-        if tool_vectors is not None and np.any(diff > 1e-6):
-            legend_elements.append(Line2D([0], [0], color='purple', label='Tool direction'))
+            if not visible_collision_indices:
+                print("Aucun point de collision visible après filtrage.")
+                return
 
-        self.ax.legend(handles=legend_elements)
+            plot_points = []
+            plot_vectors = []
+            colors = []
 
-    #-------------------------------------------------------------------
-    # Events methods
-    #-------------------------------------------------------------------
+            for idx in visible_collision_indices:
+                point = self.visible_points[idx]
+                t = self.visible_t_vector[idx]
+                n = self.visible_n_vector[idx]
+                b = self.visible_b_vector[idx]
 
-    def on_key_press(self, event):
+                # Normaliser les vecteurs
+                t = t / np.linalg.norm(t)
+                n = n / np.linalg.norm(n)
+                b = b / np.linalg.norm(b)
+
+                # Ajouter les vecteurs de base
+                plot_points.extend([point, point, point])
+                plot_vectors.extend([t, n, b])
+                colors.extend(['blue', 'green', 'red'])
+
+            if len(plot_points) > 0:
+                plot_points = np.array(plot_points)
+                plot_vectors = np.array(plot_vectors)
+
+                self.ax.quiver(
+                    plot_points[:, 0], plot_points[:, 1], plot_points[:, 2],
+                    plot_vectors[:, 0], plot_vectors[:, 1], plot_vectors[:, 2],
+                    colors=colors, normalize=True,
+                )
+
+            from matplotlib.lines import Line2D
+            legend_elements = [
+                Line2D([0], [0], color='blue', label='Tangent direction (t)'),
+                Line2D([0], [0], color='green', label='Normal direction (n)'),
+                Line2D([0], [0], color='red', label='Build direction (b)'),
+            ]
+            self.ax.legend(handles=legend_elements)
+            print(f"Visualisation des bases locales pour {len(visible_collision_indices)} points de collision.")
+
+    def _draw_tool(self):
+        """Dessine l'outil avec correction pour la visualisation"""
+        if self.show_tool and self.current_point is not None:
+            if 0 <= self.current_point < len(self.visible_indices):
+                point_idx = self.visible_indices[self.current_point]
+                point = self.visible_points[self.current_point]
+
+                # Générer et afficher la géométrie de l'outil
+                geom = self.geometry_visualizer.generate_tool_geometry(point, point_idx)
+
+                # Reshape pour la visualisation surface
+                n_points = len(geom)
+                surf_x = geom[:, 0].reshape(2, -1)
+                surf_y = geom[:, 1].reshape(2, -1)
+                surf_z = geom[:, 2].reshape(2, -1)
+
+                self.ax.plot_surface(surf_x, surf_y, surf_z,
+                                     color='gray', alpha=0.5)
+
+    def _setup_plot_limits(self):
+        """Configure les limites de l'affichage"""
+        if len(self.visible_points) > 0:
+            # Calcul des dimensions
+            x_range = np.ptp(self.visible_points[:,0])
+            y_range = np.ptp(self.visible_points[:,1])
+            z_range = np.ptp(self.visible_points[:,2])
+
+            max_range = max(x_range, y_range, z_range)
+            center = np.mean(self.visible_points, axis=0)
+
+            # Application des limites
+            self.ax.set_xlim(center[0] - max_range/2, center[0] + max_range/2)
+            self.ax.set_ylim(center[1] - max_range/2, center[1] + max_range/2)
+            self.ax.set_zlim(center[2] - max_range/2, center[2] + max_range/2)
+
+            # Force un aspect ratio égal
+            self.ax.set_box_aspect([1,1,1])
+
+    def visualize_collision_candidates(self, points, normal_vectors, build_vectors):
         """
-        Handle keyboard events
+        Visualize collision candidate points using filtered data
         """
-        if self.visible_points is None:
-            self.update_visible_points_vectors()
-
-        if len(self.visible_points) == 0:
+        if len(points) == 0:
             return
 
-        # Control detection through event modifier
-        ctrl_pressed = event.key.startswith('ctrl+') or (
-                    hasattr(event, 'mod') and event.mod & 2)  # 2 corresponds to CTRL
+        # Utiliser les dimensions depuis le collision manager
+        w_layer = self.collision_manager.collision_candidates_generator.w_layer
+        h_layer = self.collision_manager.collision_candidates_generator.h_layer
 
-        if event.key in ['4', 'ctrl+4']:  # Left equivalent
-            if ctrl_pressed:
-                # With Ctrl: move backward by stride points
-                new_index = max(0, self.current_point_index - 10)
-            else:
-                # Without Ctrl: move backward by one point
-                new_index = max(0, self.current_point_index - 1)
+        # Points gauche et droite pour tous les points (avec stride)
+        strided_points = points[::self.stride]
+        strided_normal = normal_vectors[::self.stride]
+        strided_build = build_vectors[::self.stride]
 
-            if new_index != self.current_point_index:
-                self.current_point_index = new_index
-                if self.show_tool:
-                    self.update_tool_visualization()
+        # Calcul des points candidats
+        left_points = strided_points + (w_layer / 2) * strided_normal
+        right_points = strided_points - (w_layer / 2) * strided_normal
 
-        elif event.key in ['6', 'ctrl+6']:  # Right equivalent
-            if ctrl_pressed:
-                # With Ctrl: move forward by stride points
-                new_index = min(len(self.visible_points) - 1, self.current_point_index + 10)
-            else:
-                # Without Ctrl: move forward by one point
-                new_index = min(len(self.visible_points) - 1, self.current_point_index + 1)
+        # Affichage des points candidats latéraux
+        all_points = np.vstack([left_points, right_points])
+        self.ax.scatter(all_points[:, 0],
+                        all_points[:, 1],
+                        all_points[:, 2],
+                        color='darkcyan',
+                        marker='o',
+                        s=1,
+                        label='Collision candidates')
 
-            if new_index != self.current_point_index:
-                self.current_point_index = new_index
-                if self.show_tool:
-                    self.update_tool_visualization()
+        # Points supérieurs pour la dernière couche seulement
+        if self.display_layers:
+            max_layer = max(self.display_layers)
+            start_idx = self.trajectory_manager.layer_indices[max_layer - 1] if max_layer > 0 else 0
+            end_idx = self.trajectory_manager.layer_indices[max_layer]
+            is_last_layer = np.arange(len(strided_points))[::self.stride]
+            last_layer_points = strided_points[is_last_layer]
+            last_layer_build = strided_build[is_last_layer]
+            top_points = last_layer_points + h_layer * last_layer_build
 
-        elif event.key in ['8', 'ctrl+8']:  # Up equivalent
+            # Affichage des points supérieurs
+            self.ax.scatter(top_points[:, 0],
+                            top_points[:, 1],
+                            top_points[:, 2],
+                            color='darkcyan',
+                            marker='o',
+                            s=1)
+
+    def handle_keyboard(self, event):
+        """Gestion des événements clavier"""
+        if not hasattr(self, 'current_point'):
+            self.current_point = 0
+
+        if event.key in ['left', '4']:
+            self.current_point = max(0, self.current_point - 1)
+            self.update_tool_visualization()
+        elif event.key in ['right', '6']:
+            self.current_point = min(len(self.visible_points) - 1, self.current_point + 1)
+            self.update_tool_visualization()
+        elif event.key in ['t', '8']:
             self.show_tool = not self.show_tool
             self.update_tool_visualization()
-    #-------------------------------------------------------------------
-    # Main call
-    #-------------------------------------------------------------------
+        elif event.key.startswith('ctrl+'):
+            step = 10
+            if 'left' in event.key or '4' in event.key:
+                self.current_point = max(0, self.current_point - step)
+            elif 'right' in event.key or '6' in event.key:
+                self.current_point = min(len(self.visible_points) - 1, self.current_point + step)
+            self.update_tool_visualization()
 
-    def visualize(self):
-        """Main visualization method"""
-        self.main_visualization()
+    def update_visualization(self):
+        """Met à jour la visualisation après changement d'état"""
+        self.ax.clear()
+        self.visualize_trajectory()
+        plt.draw()
+
+    def show(self):
+        """Affiche la visualisation"""
+        if not self.fig:
+            self.create_figure()
+        self.visualize_trajectory()
         plt.show()
-
