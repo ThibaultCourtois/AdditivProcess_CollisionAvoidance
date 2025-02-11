@@ -2,6 +2,7 @@ import numpy as np
 from TrajectoryDataManager import TrajectoryManager
 from CollisionAvoidance import CollisionAvoidance
 from Visualizer import AdvancedTrajectoryVisualizer
+from MetricsVisualizer import MetricsVisualizer
 
 # -------------------------------------------------------------------
 # Parameters
@@ -117,6 +118,23 @@ initial_visualizer.show()
 print("\n=== Processing Trajectory Optimization ===")
 new_tool_vectors = collision_manager.process_trajectory()
 trajectory_manager.save_modified_trajectory(new_tool_vectors, OUTPUT_FILE)
+
+# -------------------------------------------------------------------
+# Metrics Visualization
+# -------------------------------------------------------------------
+
+print("\n=== Visualizing Metrics ===")
+
+# Création du visualiseur de métriques
+metrics_visualizer = MetricsVisualizer(collision_manager, trajectory_manager)
+
+# Visualisation des angles de correction par couche
+print("Generating tilt angles by layer visualization...")
+metrics_visualizer.visualize_tilt_angles_by_layer(threshold=5)
+
+# Visualisation des angles avec seuil
+print("Generating tilt angles with threshold visualization...")
+metrics_visualizer.visualize_tilt_angle_with_threshold(collision_manager, threshold=5)
 
 # -------------------------------------------------------------------
 # Optimized trajectory visualization

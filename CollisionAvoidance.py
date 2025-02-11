@@ -104,6 +104,9 @@ class CollisionAvoidance:
         self.all_candidates_dict = {}  # Nouveau dictionnaire
         self._collision_points = None
 
+        self.points_pb = []  # Liste des points problématiques
+        self.tilt_angles = []  # Liste des angles de correction
+
     def get_collision_indices(self):
         """Retourne les indices des points de la trajectoire qui sont en collision"""
         if self._collision_points is None:
@@ -270,6 +273,14 @@ class CollisionAvoidance:
         self._collision_points = collision_points
         return self._collision_points
 
+    def get_points_pb(self):
+        """Retourne tous les points problématiques"""
+        return self.points_pb
+
+    def get_tilt_angles(self):
+        """Retourne tous les angles de correction calculés"""
+        return self.tilt_angles
+
     @staticmethod
     def compute_point_cylinder_distances(points, cylinder_start, cylinder_axis):
         """ Vectorized distances calculus between points and cylinder """
@@ -369,6 +380,11 @@ class CollisionAvoidance:
                         angle_diff += 2 * np.pi
 
                     correction_angles.append(abs(angle_diff))
+                    # Ajout du stockage des métriques
+                    self.points_pb.append(point_idx)
+                    angle_corrige = float(f"{np.degrees(abs(angle_diff)):.2f}")
+                    self.tilt_angles.append(angle_corrige)
+
                     print(f"Point {point_idx}: RESOLVED")
                     print(f"   Correction amplitude: {np.degrees(abs(angle_diff)):.2f}°")
                 else:
