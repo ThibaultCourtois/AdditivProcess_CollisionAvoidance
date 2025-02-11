@@ -7,8 +7,8 @@ from Visualizer import AdvancedTrajectoryVisualizer
 # Parameters
 # -------------------------------------------------------------------
 
-INPUT_FILE = "Trajectoire_Schwarz.csv"
-OUTPUT_FILE = "Trajectoire_Schwarz_Optimized.csv"
+INPUT_FILE = "Tore_WAAM.csv"
+OUTPUT_FILE = "Tore_WAAM_Optimized.csv"
 
 # Geometric parameters
 bead_width = 3.0  # mm
@@ -20,8 +20,8 @@ n_bead_points = 16
 n_tool_points = 16
 
 # Visualization parameters
-display_layers = [55, 60]  # Adjust according to the layers to display
-revolut_angle = 360
+display_layers = [0, 360]  # Adjust according to the layers to display
+revolut_angle = 90
 stride = 1
 
 # -------------------------------------------------------------------
@@ -95,11 +95,11 @@ initial_visualizer.geometry_visualizer.set_parameters(
 initial_visualizer.setup_visualization(
     show_beads=False,
     low_res_bead=True,
-    show_vectors=True,
+    show_vectors=False,
     show_tool=False,
     show_collisions=True,
     show_collision_candidates=False,
-    show_collision_bases=False
+    show_collision_bases=True
 )
 
 initial_visualizer.create_figure()

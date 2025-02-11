@@ -93,70 +93,90 @@ class TrajectoryManager:
         return jump_mask
 
     def fix_extremities_vector(self):
-        """Corrige les vecteurs aux points de saut en utilisant l'information d'extrusion"""
-        jump_mask = self.detect_jumps_from_extrusion()
-        indices = np.where(jump_mask)[0]
+        """Corrige les vecteurs uniquement aux points d'extrusion avant/après les sauts"""
+        # Trouver les transitions d'extrusion
+        extrusion_changes = np.where(np.diff(self.extrusion))[0]
 
-        for i in range(0, len(indices) - 1, 2):
-            start_idx = indices[i]
-            end_idx = indices[i + 1]
+        for idx in extrusion_changes:
+            # Si on passe de 1 à 0 (fin d'extrusion)
+            if self.extrusion[idx] == 1:
+                # Utiliser le vecteur du point précédent pour le dernier point d'extrusion
+                if idx > 0 and self.extrusion[idx - 1] == 1:
+                    self.t_vectors[idx] = self.t_vectors[idx - 1]
+                    self.n_vectors[idx] = np.cross(self.t_vectors[idx], self.b_vectors[idx])
+                    norm = np.linalg.norm(self.n_vectors[idx])
+                    if norm > 1e-10:
+                        self.n_vectors[idx] /= norm
 
-            # Si l'extrusion s'arrête, utiliser le vecteur suivant
-            if self.extrusion[start_idx] == 1 and self.extrusion[start_idx + 1] == 0:
-                if end_idx + 1 < len(self.points):
-                    self.t_vectors[start_idx] = self.t_vectors[end_idx + 1]
-                    self.t_vectors[end_idx] = self.t_vectors[end_idx + 1]
-            # Si l'extrusion démarre, utiliser le vecteur précédent
-            else:
-                if start_idx > 0:
-                    self.t_vectors[start_idx] = self.t_vectors[start_idx - 1]
-                    self.t_vectors[end_idx] = self.t_vectors[start_idx - 1]
-
-            # Mise à jour des normales pour les deux points
-            for idx in [start_idx, end_idx]:
-                self.n_vectors[idx] = np.cross(self.t_vectors[idx], self.b_vectors[idx])
-                norm = np.linalg.norm(self.n_vectors[idx])
-                if norm > 1e-10:
-                    self.n_vectors[idx] /= norm
+            # Si on passe de 0 à 1 (début d'extrusion)
+            elif idx + 1 < len(self.extrusion) and self.extrusion[idx + 1] == 1:
+                # Utiliser le vecteur du point suivant pour le premier point d'extrusion
+                if idx + 2 < len(self.extrusion) and self.extrusion[idx + 2] == 1:
+                    self.t_vectors[idx + 1] = self.t_vectors[idx + 2]
+                    self.n_vectors[idx + 1] = np.cross(self.t_vectors[idx + 1], self.b_vectors[idx + 1])
+                    norm = np.linalg.norm(self.n_vectors[idx + 1])
+                    if norm > 1e-10:
+                        self.n_vectors[idx + 1] /= norm
 
     def calculate_local_basis(self):
-        """Vectorized local basis calculus without Z filtering"""
-        # Initialiser les vecteurs
+        """Vectorized local basis calculus with vector propagation for non-extrusion points"""
+        # Initialize vectors
         tangents = np.zeros_like(self.points)
         normalized_t = np.zeros_like(self.points)
-
-        # Calculer toutes les différences
-        diffs = np.diff(self.points, axis=0)
-
-        # Assigner les tangentes pour tous les points
-        tangents[:-1] = diffs
-        tangents[-1] = tangents[-2]  # Dernier point
-
-        # Normalization
-        b_norms = np.linalg.norm(self.build_directions, axis=1, keepdims=True)
-        tool_norms = np.linalg.norm(self.tool_directions, axis=1, keepdims=True)
-        t_norms = np.linalg.norm(tangents, axis=1, keepdims=True)
-
-        # Masque pour éviter la division par zéro
-        non_zero_mask = t_norms > 1e-10
-
-        # Normalisation avec gestion des zéros
+        normalized_n = np.zeros_like(self.points)
         normalized_b = np.zeros_like(self.build_directions)
-        normalized_t = np.zeros_like(tangents)
         normalized_tool_direction = np.zeros_like(self.tool_directions)
 
-        normalized_b[b_norms[:, 0] > 1e-10] = self.build_directions[b_norms[:, 0] > 1e-10] / b_norms[
-            b_norms[:, 0] > 1e-10]
-        normalized_t[non_zero_mask[:, 0]] = tangents[non_zero_mask[:, 0]] / t_norms[non_zero_mask[:, 0]]
-        normalized_tool_direction[tool_norms[:, 0] > 1e-10] = self.tool_directions[tool_norms[:, 0] > 1e-10] / \
-                                                              tool_norms[tool_norms[:, 0] > 1e-10]
+        # Calculate differences for all points
+        diffs = np.diff(self.points, axis=0)
 
-        # Final vector product for n
+        # First calculate tangents for extrusion points
+        extrusion_mask = self.extrusion == 1
+
+        # Assign initial tangents for extrusion points
+        tangents[:-1][extrusion_mask[:-1]] = diffs[extrusion_mask[:-1]]
+        if extrusion_mask[-1]:
+            tangents[-1] = tangents[-2]
+
+        # Propagate tangents to non-extrusion points
+        last_valid_tangent = None
+        for i in range(len(self.points)):
+            if extrusion_mask[i]:
+                # For extrusion points, use calculated tangent
+                if np.all(tangents[i] == 0):  # If it's the last point
+                    tangents[i] = last_valid_tangent if last_valid_tangent is not None else diffs[-1]
+                last_valid_tangent = tangents[i]
+            else:
+                # For non-extrusion points, use last valid tangent
+                if last_valid_tangent is not None:
+                    tangents[i] = last_valid_tangent
+                elif i < len(diffs):  # If we don't have a valid tangent yet, look ahead
+                    next_extrusion_idx = i + 1
+                    while next_extrusion_idx < len(self.points) and not extrusion_mask[next_extrusion_idx]:
+                        next_extrusion_idx += 1
+                    if next_extrusion_idx < len(self.points):
+                        tangents[i] = tangents[next_extrusion_idx]
+
+        # Normalize all tangents
+        t_norms = np.linalg.norm(tangents, axis=1, keepdims=True)
+        mask = t_norms > 1e-10
+        normalized_t[mask[:, 0]] = tangents[mask[:, 0]] / t_norms[mask[:, 0]]
+
+        # Normalize build vectors
+        b_norms = np.linalg.norm(self.build_directions, axis=1, keepdims=True)
+        mask = b_norms > 1e-10
+        normalized_b[mask[:, 0]] = self.build_directions[mask[:, 0]] / b_norms[mask[:, 0]]
+
+        # Normalize tool vectors
+        tool_norms = np.linalg.norm(self.tool_directions, axis=1, keepdims=True)
+        mask = tool_norms > 1e-10
+        normalized_tool_direction[mask[:, 0]] = self.tool_directions[mask[:, 0]] / tool_norms[mask[:, 0]]
+
+        # Calculate normal vectors for all points
         normalized_n = np.cross(normalized_t, normalized_b)
-
-        # Normaliser n également
         n_norms = np.linalg.norm(normalized_n, axis=1, keepdims=True)
-        normalized_n[n_norms[:, 0] > 1e-10] = normalized_n[n_norms[:, 0] > 1e-10] / n_norms[n_norms[:, 0] > 1e-10]
+        mask = n_norms > 1e-10
+        normalized_n[mask[:, 0]] = normalized_n[mask[:, 0]] / n_norms[mask[:, 0]]
 
         return normalized_t, normalized_n, normalized_b, normalized_tool_direction
 
