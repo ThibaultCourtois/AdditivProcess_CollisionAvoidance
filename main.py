@@ -41,7 +41,7 @@ bead_discretization_points = 16     # Number of points for bead cross-section vi
 tool_discretization_points = 16     # Number of points for tool cylinder visualization
 
 # Visualization range parameters
-display_layers = [0, 360]  # Layer range to display
+display_layers = [0, 79]  # Layer range to display
 revolut_angle = 360        # Angular range for cylindrical parts
 stride = 1                 # Step size for point sampling
 
@@ -120,9 +120,9 @@ initial_visualizer.setup_visualization(
     low_res_bead=True,         # Use simplified bead representation
     show_vectors=False,        # Hide direction vectors
     show_tool=False,          # Hide tool geometry
-    show_collisions=True,     # Highlight collision points
+    show_collisions=False,     # Highlight collision points
     show_collision_candidates=False,  # Hide potential collision points
-    show_collision_bases=False        # Hide local coordinate systems
+    show_collision_bases=True        # Hide local coordinate systems
 )
 
 # Generate and display initial visualization
@@ -224,11 +224,11 @@ optimized_visualizer.geometry_visualizer.set_parameters(
 optimized_visualizer.setup_visualization(
     show_beads=False,           # Hide bead geometry for clarity
     low_res_bead=True,          # Use simplified bead representation
-    show_vectors=False,         # Hide direction vectors
+    show_vectors=True,         # Hide direction vectors
     show_tool=False,           # Hide tool geometry
-    show_collisions=True,      # Highlight any remaining collisions
+    show_collisions=False,      # Highlight any remaining collisions
     show_collision_candidates=False,   # Hide potential collision points
-    show_collision_bases=True          # Show local coordinate systems
+    show_collision_bases=False         # Show local coordinate systems
 )
 
 # Generate and display optimized visualization

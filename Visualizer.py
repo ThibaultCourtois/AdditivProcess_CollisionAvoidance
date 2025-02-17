@@ -351,6 +351,7 @@ class AdvancedTrajectoryVisualizer:
         self.fig = None
         self.ax = None
         self.tool_artists = []
+        self.title_components = []
 
     def setup_visualization(self, show_beads=False, low_res_bead=True, show_tool=False,
                             show_vectors=False, show_collisions=False, show_collision_candidates=False,
@@ -439,9 +440,9 @@ class AdvancedTrajectoryVisualizer:
         self.ax = self.fig.add_subplot(111, projection='3d')
 
         # Rendering optimizations
-        self.ax.set_xlabel('X')
-        self.ax.set_ylabel('Y')
-        self.ax.set_zlabel('Z')
+        self.ax.set_xlabel('X (mm)')
+        self.ax.set_ylabel('Y (mm)')
+        self.ax.set_zlabel('Z (mm)')
 
         # Disable background panels
         self.ax.xaxis.pane.fill = False
@@ -463,6 +464,81 @@ class AdvancedTrajectoryVisualizer:
 
         # Connect event handlers
         self.fig.canvas.mpl_connect('key_press_event', self.handle_keyboard)
+
+    def update_title(self):
+        """Generate and update the plot title based on active visualization components."""
+        self.title_components = []
+
+        # Add base information
+        if self.display_layers:
+            layer_info = f"Layers {min(self.display_layers)}-{max(self.display_layers)}"
+            if self.revolut_angle != 360:
+                layer_info += f" (Angle: {self.revolut_angle}°)"
+            self.title_components.append(layer_info)
+
+        # Add visualization modes
+        active_modes = []
+        if self.show_beads:
+            quality = "Low Res" if self.low_res_bead else "High Res"
+            active_modes.append(f"Beads ({quality})")
+        if self.show_tool:
+            active_modes.append("Tool")
+        if self.show_vectors:
+            active_modes.append("Vectors")
+        if self.show_collisions:
+            active_modes.append("Collisions")
+        if self.show_collision_candidates:
+            active_modes.append("Collision Candidates")
+        if self.show_collision_bases:
+            active_modes.append("Collision Bases")
+
+        if active_modes:
+            self.title_components.append("Active: " + ", ".join(active_modes))
+
+        # Set the complete title
+        title = "\n".join(self.title_components)
+        self.ax.set_title(title)
+
+    def create_legend(self):
+        """Create a comprehensive legend based on active visualization components."""
+        from matplotlib.lines import Line2D
+        legend_elements = []
+
+        # Base trajectory
+        legend_elements.append(Line2D([0], [0], color='k', label='Trajectory Path'))
+
+        # Vectors legend elements - now used for both show_vectors and show_collision_bases
+        if self.show_vectors or self.show_collision_bases:
+            legend_elements.extend([
+                Line2D([0], [0], color='blue', label='Tangent Vector (t)'),
+                Line2D([0], [0], color='green', label='Normal Vector (n)'),
+                Line2D([0], [0], color='red', label='Build Direction (b)')
+            ])
+
+            # Add tool direction if showing vectors and it differs from build direction
+            if self.show_vectors and any(np.degrees(np.arccos(np.clip(np.sum(
+                    self.visible_b_vector * self.visible_tool_vector, axis=1), -1.0, 1.0))) > 5):
+                legend_elements.append(
+                    Line2D([0], [0], color='orange', label='Tool Direction (T)')
+                )
+
+        # Collision indicators
+        if self.show_collisions:
+            legend_elements.append(
+                Line2D([0], [0], marker='x', color='red', label='Collision Points',
+                       markersize=5, linestyle='None')
+            )
+
+        if self.show_collision_candidates:
+            legend_elements.append(
+                Line2D([0], [0], marker='o', color='darkcyan',
+                       label='Potential Collision Points', markersize=3, linestyle='None')
+            )
+
+        # Add legend if we have elements
+        if legend_elements:
+            self.ax.legend(handles=legend_elements, loc='upper right',
+                           bbox_to_anchor=(1.15, 1))
 
     def visualize_trajectory(self):
         """
@@ -526,6 +602,10 @@ class AdvancedTrajectoryVisualizer:
             )
         if self.show_collision_bases:
             self._draw_collision_bases()
+
+        # Add enhanced title and legend
+        self.update_title()
+        self.create_legend()
 
         # Setup plot limits and aspect
         self._setup_plot_limits()
@@ -911,6 +991,8 @@ class AdvancedTrajectoryVisualizer:
             elif 'right' in event.key or '6' in event.key:
                 self.current_point = min(len(self.visible_points) - 1, self.current_point + step)
             self.update_tool_visualization()
+        self.update_title()
+        self.fig.canvas.draw()
 
     def update_visualization(self):
         """
@@ -919,6 +1001,8 @@ class AdvancedTrajectoryVisualizer:
         """
         self.ax.clear()
         self.visualize_trajectory()
+        self.update_title()
+        self.create_legend()
         plt.draw()
 
     def show(self):
